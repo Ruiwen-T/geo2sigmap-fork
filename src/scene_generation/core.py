@@ -710,7 +710,7 @@ class Scene:
             ET.SubElement(sionna_shape, "boolean", name="face_normals", value="true")
 
             if generate_building_map:
-                self._draw_building(building_polygon, building_height+building_z_value)
+                self._draw_building(building_polygon, building_height)
 
         del hag_handler
         xml_string = ET.tostring(scene, encoding="utf-8")

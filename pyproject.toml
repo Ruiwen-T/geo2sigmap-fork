@@ -15,7 +15,8 @@ dependencies = [
     "pyvista",
     "importlib_resources",
     "laspy[laszip]",
-    "plyfile"
+    "plyfile",
+    "trimesh"
 ]
 requires-python = ">=3.9"
 

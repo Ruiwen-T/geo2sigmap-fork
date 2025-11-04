@@ -105,6 +105,15 @@ def build_pdal_pipeline(extent_epsg3857, usgs_3dep_dataset_names, pc_resolution,
         }
         readers.append(reader)
 
+    NOAA_FMP_url = "https://noaa-nos-coastal-lidar-pds.s3.amazonaws.com/entwine/geoid18/6209/ept.json"
+    NOAA_FMP_reader = {
+            "type": "readers.ept",
+            "filename": str(NOAA_FMP_url),
+            "polygon": str(extent_epsg3857),
+            "requests": 3,
+            "resolution": pc_resolution
+    }
+    readers.append(NOAA_FMP_reader)
     pointcloud_pipeline = {
         "pipeline":
             readers

@@ -16,13 +16,15 @@ dependencies = [
     "importlib_resources",
     "laspy[laszip]",
     "plyfile",
-    "trimesh"
+    "trimesh",
+    "pooch"
 ]
 requires-python = ">=3.9"
 
 
 [project.scripts]
 scenegen = "scene_generation.cli:main"
+scenegen_download = "scene_generation.dem_gpkg_data:get_fesm_paths"
 
 
 [tool.setuptools.packages.find]

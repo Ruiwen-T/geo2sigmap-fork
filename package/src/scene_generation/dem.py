@@ -2,14 +2,16 @@ from pathlib import Path
 from .USGS1mLocator_parallel import *
 from .dem_utils import *
 from importlib_resources import files
+from .dem_gpkg_data import get_fesm_paths
 def generate_terrain_mesh_dem(aoi_poly, ply_save_path,):
     ply_save_path = Path(ply_save_path)
 
-   
+
+    gpkg_files = get_fesm_paths()
     
     locator = USGS1mLocator(
-        files('scene_generation.data').joinpath("gpkg_files/FESM_1m.gpkg"),
-        files('scene_generation.data').joinpath("gpkg_files/10_km_cell_grid.gpkg"),
+        gpkg_files[1],
+        gpkg_files[0],
         debug=True
     )
     locator.set_debug(False)

@@ -26,7 +26,7 @@ import datetime
 import pyvista as pv
 from pathlib import Path
 
-
+from .dem import generate_terrain_mesh_dem
 # Create a module-level logger
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ class Scene:
         rooftop_material_type="mat-itu_metal",
         wall_material_type="mat-itu_concrete",
         lidar_terrain:bool = False,
+        dem_terrain:bool = False,
         gen_lidar_terrain_only:bool = False
     ):
         """
@@ -326,10 +327,18 @@ class Scene:
                 assert tif_file_path.exists(), f"TIF file does not exist: {tif_file_path}"
                 print("Skip the lidar_terrain.ply")
                 if not Path(os.path.join(data_dir,"mesh" ,"lidar_terrain.ply")).exists():
-                    generate_terrain_mesh(os.path.join(data_dir, "test_hag.laz"),
-                        os.path.join(mesh_data_dir, f"lidar_terrain.ply"), src_crs=projection_UTM_EPSG_code, dest_crs=projection_UTM_EPSG_code,
-                        plot_figures=False, center_x=center_x, center_y=center_y
-                    )
+
+                    if dem_terrain:
+                        generate_terrain_mesh_dem(
+                            affinity.scale(ground_polygon_4326, xfact=ground_scale, yfact=ground_scale, origin='centroid'),
+                            os.path.join(mesh_data_dir, f"lidar_terrain.ply")
+                        )
+                    else:
+                        
+                        generate_terrain_mesh(os.path.join(data_dir, "test_hag.laz"),
+                            os.path.join(mesh_data_dir, f"lidar_terrain.ply"), src_crs=projection_UTM_EPSG_code, dest_crs=projection_UTM_EPSG_code,
+                            plot_figures=False, center_x=center_x, center_y=center_y
+                        )
             if gen_lidar_terrain_only:
                 print("gen_lidar_terrain_only: True")
                 return

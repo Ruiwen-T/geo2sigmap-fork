@@ -138,6 +138,12 @@ def main():
     )
 
     common_parser.add_argument(
+        "--enable-dem-terrain",
+        action="store_true",
+        help="Using USGS 1M DEM data to generate terrain mesh.",
+    )
+
+    common_parser.add_argument(
         "--ground-material",
         default=14,
         type=int,
@@ -325,6 +331,7 @@ def main():
             rooftop_material_type=list(ITU_MATERIALS.items())[args.rooftop_material][0],
             wall_material_type=list(ITU_MATERIALS.items())[args.wall_material][0],
             lidar_terrain=args.enable_lidar_terrain,
+            dem_terrain=args.enable_dem_terrain
         )
     elif args.command == "point":
         polygon_points_gps = rect_from_point_and_size(

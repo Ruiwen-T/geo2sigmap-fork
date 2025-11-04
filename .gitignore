@@ -11,3 +11,4 @@ cache/
 src/scene_generation.egg-info/
 /*.ipynb
 plot_temp.png
+**/resources.geojson

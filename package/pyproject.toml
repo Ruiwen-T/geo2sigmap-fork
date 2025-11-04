@@ -17,7 +17,8 @@ dependencies = [
     "laspy[laszip]",
     "plyfile",
     "trimesh",
-    "pooch"
+    "pooch",
+    "boto3"
 ]
 requires-python = ">=3.9"
 

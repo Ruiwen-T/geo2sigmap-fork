@@ -1,0 +1,2 @@
+[console_scripts]
+scenegen = scene_generation.cli:main

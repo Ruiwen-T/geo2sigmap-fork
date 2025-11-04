@@ -12,3 +12,4 @@ cache/
 /*.ipynb
 plot_temp.png
 **/resources.geojson
+**/scenes

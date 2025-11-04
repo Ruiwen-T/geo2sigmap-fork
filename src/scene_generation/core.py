@@ -419,9 +419,9 @@ class Scene:
         ET.SubElement(scene, "default", name="scenegen_bbox_width", value=str(width))
         ET.SubElement(scene, "default", name="scenegen_bbox_length", value=str(height))
 
-        if width > 5000 or height > 5000:
-            logger.warning(f"Too large!")
-            exit(-1)
+        # if width > 5000 or height > 5000:
+        #     logger.warning(f"Too large!")
+        #     exit(-1)
 
         # OSMnx features API uses bounding box in the form (north, south, east, west)
         logger.debug(

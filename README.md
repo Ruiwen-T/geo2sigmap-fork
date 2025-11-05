@@ -3,27 +3,40 @@
 [![arXiv](https://img.shields.io/badge/arXiv-2312.14303-green?color=FF8000?color=009922)](https://arxiv.org/abs/2312.14303)
 [![Code License](https://img.shields.io/badge/Code%20License-Apache_2.0-yellow.svg)](https://github.com/functions-lab/geo2sigmap/blob/main/LICENSE)
 
-<!-- Welcome to the Geo2SigMap, this is the first work that: 
-* Designs an automated framework that integrates open-source tools, including geographic databases (OSM), computer graphics (Blender), and ray tracing (Sionna), and supports scalable ray tracing and RF signal mapping at-scale using real-world building information;
-* Develops a novel cascaded U-Net architecture that achieves significantly improved signal strength (SS) map prediction accuracy compared to existing baseline methods based on channel models and ML.
- -->
+Welcome to the Geo2SigMap. Our repository has been divided into two primary components: 
+- **Scene Generation**: A pure Python-based pipeline for generating 3D scenes for arbitrary areas of interest. This new Python-based pipeline replaces the scene generation pipeline used in our [DySPAN'24 paper](https://ieeexplore.ieee.org/document/10632773), and is more scalable, efficient and user-friendly.
+- **ML-based Propagation Model**: ML-based signal coverage prediction using our pre-trained model based on the cascaded U-Net architecture, also described in our DySPAN'24 paper.
 
-Welcome to the Geo2SigMap, the **current version (v1.0.0)** consists of two main components: 
-- **Scene Generation**: A pure Python-based pipeline for generating 3D scenes for arbitrary areas of interest. This new Python-based pipeline replaces the scene generation pipeline used in our [DySPAN'24 paper](https://ieeexplore.ieee.org/document/10632773), and is more scalable, efficient, and user-friendly.
-- **ML-based Propagation Model**: ML-based signal coverage prediction using the pre-train model based on the cascaded U-Net architecture, also described in our DySPAN'24 paper.
-
-
-## TABLE OF CONTENTS
-1. [Overview](#overview)
-2. [Installation](#installation)
-3. [Examples](#examples)
-4. [License](#license)
+Our newest release **v2.0.0** has enhanced the original scene generation pipeline by incoporating LiDAR terrain data and downstream Digital Elevation Models (DEM). Data was sourced from the USGS 3D Elevation Program (https://www.usgs.gov/3d-elevation-program). The tool does not depend on this data for its operation. In areas with insufficient data, a flat terrain can still be assumed.
 
 ## Overview
 
-Geo2SigMap is an efficient framework for high-fidelity RF signal mapping leveraging geographic databases, ray tracing, and a novel cascaded U-Net model. Geo2SigMap features a scalable, automated pipeline that efficiently generates 3D building and path gain (PG) maps via the integration of a suite of open-sourced tools, including OpenStreetMap (OSM), ~~Blender~~, and Sionna. Geo2SigMap also features a cascaded U-Net model, which is pre-trained on pure synthetic datasets leveraging the building map and sparse signal strength (SS) map as input to predict the full SS map for the target (unseen) area. The performance of Geo2SigMap has been evaluated using large-scale field measurements collected using three types of user equipment (UE) across six LTE cells operating in the citizens broadband radio service (CBRS) band deployed on the Duke University West Campus. Our results show that Geo2SigMap achieves significantly improved root-mean-square error (RMSE) in terms of the SS map prediction accuracy compared to existing baseline methods based on channel models and ML.
+Geo2SigMap is an efficient framework for high-fidelity RF signal mapping leveraging geographic databases, ray tracing, and a novel cascaded U-Net model. Geo2SigMap features a scalable, automated pipeline that efficiently generates 3D building and path gain (PG) maps via the integration of a suite of open-source tools including OpenStreetMap (OSM) and Nvidia's Sionna Library. Geo2SigMap also features a cascaded U-Net model, which is pre-trained on pure synthetic datasets leveraging the building map and sparse signal strength (SS) map as input to predict the full SS map for the target (unseen) area. The performance of Geo2SigMap has been evaluated using large-scale field measurements collected using three types of user equipment (UE) across six LTE cells operating in the Citizens Broadband Radio Service (CBRS) band deployed on the Duke University West Campus. Our results show that Geo2SigMap achieves significantly improved root-mean-square error (RMSE) in terms of the SS map prediction accuracy compared to existing baseline methods based on channel models and ML.
 
-### Citation
+## Project Structure
+
+```sh
+geo2sigmap/
+├── package # Package Files
+│   └── src
+│       ├── scene_generation # Scene Generation Pipeline 
+│       ...
+├── research # ML Model and Notebook Examples
+│   ├── data # Datasets
+│   │   └── measurements
+│   └── examples # Example Notebooks
+│       └── antenna_Pattern
+...
+
+```
+
+## Installation
+
+Instructions for installing the Scene Generation CLI tool can be found [here](./package/README.md). We have isolated these instructions to a sub-README to avoid confusion with our notebook examples. 
+
+Instructions for running the example notebooks can be found [here](./research/README.md). Each notebook example requires that you manage package dependencies **independently**. Feel free to use any environment/package manager.
+
+## Citation
 
 If you find Geo2SigMap useful for your research, please consider citing this paper:
 ```
@@ -34,147 +47,6 @@ If you find Geo2SigMap useful for your research, please consider citing this pap
   year={2024}
 }
 ```
-
-### Project Structure
-
-```sh
-geo2sigmap/
-├── data/                  
-│   ├── measurements       # measurement data
-│   ├── model_unet         # pre-trained ML model
-│   └── ...                
-├── examples               # example tutorials and notebooks
-│   ├── *.ipynb            # tutorial in Juypter notebooks
-│   └── ...                
-├── src/                   
-│   ├── scene_generation   # 3D scene generation pipeline
-│   └── ...                
-├── tools/                 # Tools to create datasets and more   
-│   └── meshrir_split.py   # Create meshrir dataset split
-├── .gitignore
-├── LICENSE                
-├── README.md              
-├── pyproject.toml         
-└── requirements.txt             
-```
-
-## Installation
-
-#### Dependency
-* Python >= 3.9
-  
-```bash
-git clone https://github.com/functions-lab/geo2sigmap
-cd geo2sigmap
-python3 -m pip install .
-```
-
-If you plan to use the generated 3D scenes with Sionna RT, please refer to [Sionna RT Installation](https://nvlabs.github.io/sionna/installation.html) for the required Python versions (3.8-3.11) and the use of [virtual environment](https://docs.python.org/3/tutorial/venv.html). 
-
-## Examples
-
-### Example Notebooks
-
-The repository includes Jupyter notebooks demonstrating various aspects of Geo2SigMap:
-
-- [Tutorial #1](examples/1_sionna_coverage_map.ipynb): Using `Sionna` to load and visualize arbitrary 3D scenes generated by our tool, with the corresponding coverage map obtained using [Sionna RT](https://nvlabs.github.io/sionna/examples/Sionna_Ray_Tracing_Introduction.html).
-- [Tutorial #2](examples/2_sionna_rays_analysis.ipynb): Randomly generate outdoor RX locations and perform point-to-point ray tracing to analyze detailed ray properties.
-- [Tutorial #3](examples/3_visualize_measurements.ipynb): Using `Bokeh` to visualize the CBRS LTE measurements collected on the Duke campus.
-- [Tutorial #4](examples/4_ml_coverage_map.ipynb): Complete workflow including scene generation, ML model inference, and evaluation using measurement data.
-- [Tutorial #5](examples/5_scene_nist_28ghz_boulder.ipynb): Evaluation of the NIST 28 GHz measurements.
-
-
-### CLI Tool Example Usage
-
-Below are examples showing how to generate a 3D scene for your chosen location. There are two ways to define the bounding box (scene area):
-
-1. Directly specify four GPS corners.
-2. Provide one GPS point, indicate its position in the rectangle (top-left, bottom-right, etc.), and supply width and height in meters.
-
-To see all available options for scene generation, use `-h`:
-
-#### 1) Generate 3D Scene using Four Corner Points
-```console
-$ scenegen bbox -71.0602 42.3512 -71.0484 42.3591 --data-dir scenes/Boston
-
-[INFO] Check the bbox at http://bboxfinder.com/#42.3512,-71.0602,42.3591,-71.0484
-[INFO] Using UTM Zone: EPSG:32619
-[INFO] 
-[INFO] Ground Material Type:           Wet Ground       | Frequency Range:   1   -  10   (GHz)
-[INFO] Building Rooftop Material Type: Metal            | Frequency Range:   1   -  100  (GHz)
-[INFO] Building Wall Material Type:    Concrete         | Frequency Range:   1   -  100  (GHz)
-[INFO] 
-[INFO] Estimated ground polygon size: width=994m, height=901m
-Parsing buildings: 100%|█████████████████████| 389/389 [00:00<00:00, 1403.12it/s]
-```
-The above commands generate a 3D scene for an area in downtown Boston. You can preview or verify the bounding box at [bboxfinder.com](http://bboxfinder.com/#42.3512,-71.0602,42.3591,-71.0484).
-
-#### 2) Generate 3D Scene using One Point + Rectangle Dimension
-```console
-$ scenegen point -71.0550 42.3566 top-left 997 901 --data-dir scenes/Boston_top-left
-
-[INFO] Check the bbox at http://bboxfinder.com/#42.3485,-71.0547,42.3568,-71.0429
-[INFO] Using UTM Zone: EPSG:32619
-[INFO] 
-[INFO] Ground Material Type:           Wet Ground       | Frequency Range:   1   -  10   (GHz)
-[INFO] Building Rooftop Material Type: Metal            | Frequency Range:   1   -  100  (GHz)
-[INFO] Building Wall Material Type:    Concrete         | Frequency Range:   1   -  100  (GHz)
-[INFO] 
-[INFO] Estimated ground polygon size: width=997m, height=902m
-Parsing buildings: 100%|█████████████████████| 168/168 [00:00<00:00, 1383.61it/s]
-```
-
-Note: The public overpass-api.de server imposes query rate limits (~2–10 queries/sec). For higher throughput (e.g., ~100–200 queries/sec on an SSD machine), consider [hosting your own OSM server](https://wiki.openstreetmap.org/wiki/Overpass_API/Installation).
-
-#### 3) Customize Material Types for Ground, Building Rooftops/Walls
-You can specify material types for different surfaces using the following arguments: `--ground-material`, `--rooftop-material`, and `--wall-material` followed by a `<MATERIAL_ID>`. List all available materials and their properties using:
-```console
-$ scenegen --list-materials
-
-Available ITU materials and their frequency ranges:
-ID |         Name         | Frequency Range (GHz)
-0  | Vacuum (≈Air)        | 0.001 -  100 
----------------------------------------------------
-1  | Concrete             |   1   -  100 
----------------------------------------------------
-2  | Brick                |   1   -  40  
----------------------------------------------------
-3  | Plasterboard         |   1   -  100 
----------------------------------------------------
-4  | Wood                 | 0.001 -  100 
----------------------------------------------------
-5  | Glass                |  0.1  -  100 
-   |                      |  220  -  450 
----------------------------------------------------
-6  | Ceiling Board        |   1   -  100 
-   |                      |  220  -  450 
----------------------------------------------------
-7  | Chipboard            |   1   -  100 
----------------------------------------------------
-8  | Plywood              |   1   -  40  
----------------------------------------------------
-9  | Marble               |   1   -  60  
----------------------------------------------------
-10 | Floorboard           |  50   -  100 
----------------------------------------------------
-11 | Metal                |   1   -  100 
----------------------------------------------------
-12 | Very Dry Ground      |   1   -  10  
----------------------------------------------------
-13 | Medium Dry Ground    |   1   -  10  
----------------------------------------------------
-14 | Wet Ground           |   1   -  10  
----------------------------------------------------
-Material properties based on ITU-R Recommendation P.2040-2: 
-        "Effects of building materials and structures on radiowave propagation above about 100 MHz"
-```
-
-
-#### 4) Preview 3D Scene in Sionna
-
-After the above example command, the 3D scene file is saved to the corresponding folder under `./scenes/`. You can load it directly in Sionna to explore or run ray tracing simulations. Please refer to [Tutorial #1](examples/sionna_rt_coverage_map.ipynb) and [Tutorial #2](examples/sionna_rt_rays_analyze.ipynb) for two example notebooks.
-
-
 ## License
 
 Distributed under the APACHE LICENSE, VERSION 2.0

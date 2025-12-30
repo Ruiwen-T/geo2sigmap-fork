@@ -353,6 +353,8 @@ def main():
             ground_material_type=list(ITU_MATERIALS.items())[args.ground_material][0],
             rooftop_material_type=list(ITU_MATERIALS.items())[args.rooftop_material][0],
             wall_material_type=list(ITU_MATERIALS.items())[args.wall_material][0],
+            lidar_terrain=args.enable_lidar_terrain,
+            dem_terrain=args.enable_dem_terrain
         )
     elif args.command == "validate":
         res_dict = {

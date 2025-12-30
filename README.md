@@ -49,6 +49,6 @@ If you find Geo2SigMap useful for your research, please consider citing this pap
 ```
 ## License
 
-Distributed under the APACHE LICENSE, VERSION 2.0
+CC BY-NC 4.0
 
 Thank you for using Geo2SigMap! If you have any questions or suggestions, feel free to open an issue on GitHub. We hope this framework accelerates your research or application in RF signal mapping.

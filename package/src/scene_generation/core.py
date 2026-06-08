@@ -21,6 +21,8 @@ from .utils import *
 from .itu_materials import ITU_MATERIALS
 import open3d.core as o3c
 
+from .overture_buildings import load_overture_buildings_for_aoi, resolve_building_height
+
 import datetime
 
 import pyvista as pv
@@ -436,6 +438,7 @@ class Scene:
         logger.debug(
             f"OSM bounding box: (north={north}, south={south}, east={east}, west={west})"
         )
+        # buildings are identified from OSM (look for bounding box and "building" tag)
         buildings = ox.features.features_from_bbox(
             bbox=ground_polygon_4326_bbox, tags={"building": True}
         )
@@ -445,6 +448,18 @@ class Scene:
         # OSM will return some extra buildings.
         filtered_buildings = buildings[buildings.intersects(ground_polygon)]
         buildings_list = filtered_buildings.to_dict("records")
+
+        try:
+            overture_buildings = load_overture_buildings_for_aoi(
+                ground_polygon_4326_bbox,
+                projection_UTM_EPSG_code,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Unable to load Overture building heights; falling back to LiDAR/OSM/random heights: %s",
+                exc,
+            )
+            overture_buildings = None
 
         # ---------------------------------------------------------------------
         # 6) If generating building map, prepare an empty grayscale image
@@ -467,6 +482,7 @@ class Scene:
         # 8) Process each building to create a 3D mesh (extrude by building height)
         # ---------------------------------------------------------------------
 
+        # convert each record to a Shapely footprint
         for idx, building in tqdm(
             enumerate(buildings_list),
             total=len(buildings_list),
@@ -484,8 +500,11 @@ class Scene:
                 )
                 continue
 
-            # First try to get building height from LiDAR
+            # Height prioritization hierarchy
+            '''
+            # First, try to get building height from LiDAR
             if hag_handler:
+                # sample 30 random points within the building footprint
                 random_points = generate_random_points(building_polygon, 30)
                 abs_height = []
                 for point in random_points:
@@ -507,15 +526,26 @@ class Scene:
                 print("Building height list: ", abs_height)
                 print()
                 try:
+                    # use the mean of valid HAG samples
                     building_height = np.mean(filtered_list)
                     print("Avg Building Height: ", building_height)
                     if math.isnan(building_height):
                         raise ValueError("The value is NaN")
                 except Exception as e:
+                    # fallback: random_building_height()
                     print("Random Building Height: ", building_height)
                     building_height = random_building_height(building, building_polygon)
             else:
+                # if no LiDAR, directly use random_building_height()
                 building_height = random_building_height(building, building_polygon)
+            '''
+            building_height = resolve_building_height(
+                building,
+                building_polygon,
+                hag_handler=hag_handler,
+                to_4326=to_4326,
+                overture_buildings=overture_buildings,
+            )
 
             # Skip buildings with height <= 0
             if building_height <=0:

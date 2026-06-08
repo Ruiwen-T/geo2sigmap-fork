@@ -292,11 +292,11 @@ def resolve_building_height(
 
     The priority order is:
       1. LiDAR HAG samples, when ``hag_handler`` and ``to_4326`` are provided.
-      2. Overture footprint match: explicit ``height`` first, then
-         ``num_floors * floor_height_m`` when enabled.
-      3. OSM explicit height tags: ``building:height`` or ``height``.
+      2. OSM explicit height tags: ``building:height`` or ``height``.
+      3. Overture footprint match with explicit ``height``.
       4. OSM floor count: ``building:levels`` or ``levels``.
-      5. Random fallback matching the scene generator's previous behavior.
+      5. Overture ``num_floors * floor_height_m`` when enabled.
+      6. Random fallback matching the scene generator's previous behavior.
 
     Parameters
     ----------
@@ -312,8 +312,9 @@ def resolve_building_height(
     overture_buildings
         Optional Overture candidates in the same CRS as ``building_polygon``.
     overture_height
-        Optional precomputed Overture height in meters. If supplied, it is used
-        before querying ``overture_buildings``.
+        Optional precomputed exact Overture height in meters. If supplied, it
+        is used after OSM explicit height tags and before querying
+        ``overture_buildings`` for an exact height match.
     return_source
         If true, return ``(height, metadata)``. Otherwise return just height.
     """
@@ -328,6 +329,10 @@ def resolve_building_height(
     if height is not None:
         return _height_result(height, "hag", return_source)
 
+    height, source = _explicit_height_from_osm(building)
+    if height is not None:
+        return _height_result(height, source, return_source)
+
     height = _positive_float(overture_height)
     if height is not None:
         return _height_result(height, "overture:height", return_source)
@@ -337,21 +342,29 @@ def resolve_building_height(
             building_polygon,
             overture_buildings,
             floor_height_m=floor_height_m,
-            use_num_floors=use_overture_num_floors,
+            use_num_floors=False,
             return_match=True,
         )
         if height is not None:
             source = f"overture:{match['height_source']}"
             return _height_result(height, source, return_source, match)
 
-    height, source = _explicit_height_from_osm(building)
-    if height is not None:
-        return _height_result(height, source, return_source)
-
     if use_osm_levels:
         height, source = _height_from_osm_levels(building, floor_height_m)
         if height is not None:
             return _height_result(height, source, return_source)
+
+    if use_overture_num_floors and overture_buildings is not None:
+        height, match = lookup_overture_height(
+            building_polygon,
+            overture_buildings,
+            floor_height_m=floor_height_m,
+            use_num_floors=True,
+            return_match=True,
+        )
+        if height is not None:
+            source = f"overture:{match['height_source']}"
+            return _height_result(height, source, return_source, match)
 
     height = _random_fallback_height(floor_height_m)
     return _height_result(height, "fallback:random", return_source)

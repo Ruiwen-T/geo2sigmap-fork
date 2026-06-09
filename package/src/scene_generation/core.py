@@ -21,7 +21,12 @@ from .utils import *
 from .itu_materials import ITU_MATERIALS
 import open3d.core as o3c
 
-from .overture_buildings import load_overture_buildings_for_aoi, resolve_building_height
+from .overture_buildings import (
+    HEIGHT_PRIORITY_NO_OVERTURE,
+    load_overture_buildings_for_aoi,
+    normalize_building_height_priority,
+    resolve_building_height,
+)
 
 import datetime
 
@@ -67,7 +72,8 @@ class Scene:
         wall_material_type="mat-itu_concrete",
         lidar_terrain:bool = False,
         dem_terrain:bool = False,
-        gen_lidar_terrain_only:bool = False
+        gen_lidar_terrain_only:bool = False,
+        building_height_priority: str = "overture-first",
     ):
         """
         Generate a ground mesh from the given polygon (defined by `points`),
@@ -90,6 +96,10 @@ class Scene:
             If True, write the ply file in ascii format, otherwise binary format will be used.
         ground_scale : float, optional
             The ratio to scale the ground polygon. TODO:Add examples to show why need scale. OSMNX query intersection.
+        building_height_priority : str, optional
+            Building height source order. Supported values are "no-overture",
+            "overture-first", and "osm-first". Numeric aliases "1", "2",
+            and "3" map to those modes respectively.
 
         Returns
         -------
@@ -104,6 +114,9 @@ class Scene:
             raise ValueError(f"Invalid rooftop material type: {rooftop_material_type}")
         if wall_material_type not in ITU_MATERIALS:
             raise ValueError(f"Invalid wall material type: {wall_material_type}")
+        building_height_priority = normalize_building_height_priority(
+            building_height_priority
+        )
         
         # ---------------------------------------------------------------------
         # 1) Setup OSM server and transforms
@@ -449,17 +462,20 @@ class Scene:
         filtered_buildings = buildings[buildings.intersects(ground_polygon)]
         buildings_list = filtered_buildings.to_dict("records")
 
-        try:
-            overture_buildings = load_overture_buildings_for_aoi(
-                ground_polygon_4326_bbox,
-                projection_UTM_EPSG_code,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Unable to load Overture building heights; falling back to LiDAR/OSM/random heights: %s",
-                exc,
-            )
+        if building_height_priority == HEIGHT_PRIORITY_NO_OVERTURE:
             overture_buildings = None
+        else:
+            try:
+                overture_buildings = load_overture_buildings_for_aoi(
+                    ground_polygon_4326_bbox,
+                    projection_UTM_EPSG_code,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Unable to load Overture building heights; falling back to LiDAR/OSM/random heights: %s",
+                    exc,
+                )
+                overture_buildings = None
 
         # ---------------------------------------------------------------------
         # 6) If generating building map, prepare an empty grayscale image
@@ -545,6 +561,7 @@ class Scene:
                 hag_handler=hag_handler,
                 to_4326=to_4326,
                 overture_buildings=overture_buildings,
+                height_priority=building_height_priority,
             )
 
             # Skip buildings with height <= 0

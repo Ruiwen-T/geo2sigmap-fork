@@ -1,602 +1,693 @@
 """
-Utilities sub-package for the Scene Generation library.
+Helpers for loading Overture Maps building footprints for a scene AOI.
+
+The scene generator already works in two coordinate spaces:
+  * EPSG:4326 for external data lookups.
+  * A local UTM CRS for mesh generation and footprint matching.
+
+This module keeps the Overture query in EPSG:4326, then optionally reprojects
+the returned GeoDataFrame to the caller's target CRS.
 """
 
-import pyproj
-from pyproj import Transformer, CRS
+from __future__ import annotations
 
-from shapely.geometry import (
-    Polygon,
-    MultiPolygon,
-    LinearRing,
-    Point
+import logging
+import math
+import re
+from typing import Dict, Optional, Sequence, Tuple, Union
+
+import geopandas as gpd
+import numpy as np
+from shapely.geometry import box
+from shapely.geometry.base import BaseGeometry
+
+from .utils import generate_random_points
+
+logger = logging.getLogger(__name__)
+
+
+OVERTURE_BUILDINGS_RELEASE = "2026-05-20.0"
+OVERTURE_BUILDINGS_S3_TEMPLATE = (
+    "s3://overturemaps-us-west-2/release/{release}/theme=buildings/type=building/*"
+)
+OVERTURE_BUILDINGS_AZURE_TEMPLATE = (
+    "az://overturemapswestus2.blob.core.windows.net/release/"
+    "{release}/theme=buildings/type=building/*"
 )
 
-import numpy as np
-import math
-from rasterio.enums import Resampling
-from rasterio.warp import transform_bounds, transform
-import rasterio
+HEIGHT_PRIORITY_NO_OVERTURE = "no-overture"
+HEIGHT_PRIORITY_OVERTURE_FIRST = "overture-first"
+HEIGHT_PRIORITY_OSM_FIRST = "osm-first"
+BUILDING_HEIGHT_PRIORITY_OPTIONS = (
+    HEIGHT_PRIORITY_NO_OVERTURE,
+    HEIGHT_PRIORITY_OVERTURE_FIRST,
+    HEIGHT_PRIORITY_OSM_FIRST,
+)
+_HEIGHT_PRIORITY_ALIASES = {
+    "1": HEIGHT_PRIORITY_NO_OVERTURE,
+    "none": HEIGHT_PRIORITY_NO_OVERTURE,
+    "no": HEIGHT_PRIORITY_NO_OVERTURE,
+    "off": HEIGHT_PRIORITY_NO_OVERTURE,
+    "false": HEIGHT_PRIORITY_NO_OVERTURE,
+    "no-overture": HEIGHT_PRIORITY_NO_OVERTURE,
+    "osm-only": HEIGHT_PRIORITY_NO_OVERTURE,
+    "2": HEIGHT_PRIORITY_OVERTURE_FIRST,
+    "overture": HEIGHT_PRIORITY_OVERTURE_FIRST,
+    "overture-first": HEIGHT_PRIORITY_OVERTURE_FIRST,
+    "overture-over-osm": HEIGHT_PRIORITY_OVERTURE_FIRST,
+    "3": HEIGHT_PRIORITY_OSM_FIRST,
+    "osm-first": HEIGHT_PRIORITY_OSM_FIRST,
+    "osm-explicit-first": HEIGHT_PRIORITY_OSM_FIRST,
+    "osm-explicit-over-overture": HEIGHT_PRIORITY_OSM_FIRST,
+}
 
-from typing import List, Tuple
+
+def normalize_building_height_priority(priority: str) -> str:
+    normalized = _HEIGHT_PRIORITY_ALIASES.get(str(priority).strip().lower())
+    if normalized is None:
+        valid = ", ".join(BUILDING_HEIGHT_PRIORITY_OPTIONS)
+        raise ValueError(
+            f"Invalid building height priority '{priority}'. Valid values: {valid}"
+        )
+    return normalized
 
 
-
-try:
-    from importlib.metadata import version as pkg_version, PackageNotFoundError
-except ImportError:
-    # For Python < 3.8, use importlib_metadata backport
-    from importlib_metadata import version as pkg_version, PackageNotFoundError
-import math
-
-PACKAGE_NAME = "scene_generation"
-
-
-def get_package_version() -> str:
+def load_overture_buildings_for_aoi(
+    bbox_4326: Sequence[float],
+    target_crs=None,
+    *,
+    release: str = OVERTURE_BUILDINGS_RELEASE,
+    source: str = "s3",
+    parquet_path: Optional[str] = None,
+    require_height: bool = False,
+    duckdb_connection=None,
+) -> gpd.GeoDataFrame:
     """
-    Attempt to retrieve the installed package version from metadata.
-    Falls back to a default if the package isn't found (not installed).
-    """
-    try:
-        return pkg_version(PACKAGE_NAME)
-    except PackageNotFoundError:
-        return "0.0.0.dev (uninstalled)"
-    
-    
-# -------------------------------------------------------------------
-# 1) Geographic Coordinate System Related
-# -------------------------------------------------------------------
+    Load Overture building footprints intersecting a WGS84 bounding box.
 
-def top_left_to_center(x, y, width, height):
-    """
-    Converts coordinates from a top-left origin system to a center-origin system.
-
-    Parameters:
-    x (float): X-coordinate in the top-left system.
-    y (float): Y-coordinate in the top-left system.
-    width (float): Total width of the coordinate space.
-    height (float): Total height of the coordinate space.
-
-    Returns:
-    (float, float): Transformed (x', y') in the center-origin system.
-    """
-    x_center = x - width / 2
-    y_center = (height / 2) - y
-    return x_center, y_center
-
-    
-def get_utm_epsg_code_from_gps(lon: float, lat: float) -> CRS:
-    """
-    Determine the UTM coordinate reference system (CRS) appropriate for a given
-    longitude/latitude using WGS84 as the datum.
-
-    This function queries pyproj's database for the UTM zone that best fits
-    the point of interest (defined by lon/lat).
-
-    Parameters:
+    Parameters
     ----------
-    lon : float
-        Longitude in decimal degrees.
-    lat : float
-        Latitude in decimal degrees.
+    bbox_4326
+        Bounding box in ``(min_lon, min_lat, max_lon, max_lat)`` order.
+    target_crs
+        Optional CRS to reproject the returned GeoDataFrame into. Pass the
+        scene's UTM CRS when matching against OSM footprints inside ``Scene``.
+    release
+        Overture release string used when ``parquet_path`` is not supplied.
+    source
+        Cloud source for the default path. Supported values: ``"s3"`` and
+        ``"azure"``.
+    parquet_path
+        Override path for testing or pinned local/cloud data. This should point
+        at the Overture buildings GeoParquet partition.
+    require_height
+        If true, keep only rows with a positive explicit ``height`` value.
+        Leave false if you also want to use ``num_floors`` as a fallback.
+    duckdb_connection
+        Optional existing DuckDB connection, mostly useful for tests.
 
-    Returns:
+    Returns
     -------
-    utm_crs : CRS
-        A pyproj CRS object representing the best matching UTM projection
-        (e.g., EPSG:32633).
+    geopandas.GeoDataFrame
+        Overture buildings in EPSG:4326, or ``target_crs`` when provided.
+        Columns include ``id``, ``height``, ``num_floors``, ``min_height``,
+        ``roof_height``, ``subtype``, ``class``, ``has_parts``, and
+        ``geometry`` when present in the source schema.
     """
 
-    # Query for possible UTM CRS definitions covering our point of interest
-    utm_crs_list = pyproj.database.query_utm_crs_info(
-        datum_name="WGS 84",
-        area_of_interest=pyproj.aoi.AreaOfInterest(
-            west_lon_degree=lon,
-            south_lat_degree=lat,
-            east_lon_degree=lon,
-            north_lat_degree=lat,
-        ),
+    min_lon, min_lat, max_lon, max_lat = _normalize_bbox_4326(bbox_4326)
+    path = parquet_path or _overture_buildings_path(release, source)
+
+    con, owns_connection = _get_duckdb_connection(duckdb_connection)
+    try:
+        _load_duckdb_extensions(con)
+        if source == "s3" and parquet_path is None:
+            con.execute("SET s3_region='us-west-2'")
+            con.execute("SET s3_url_style='vhost'")
+            con.execute("SET s3_use_ssl=true")
+            con.execute("SET s3_requester_pays=false")
+
+        height_filter = "AND height IS NOT NULL AND height > 0" if require_height else ""
+        query = f"""
+            SELECT
+                id,
+                subtype,
+                class,
+                height,
+                num_floors,
+                min_height,
+                roof_height,
+                has_parts,
+                bbox.xmin AS bbox_xmin,
+                bbox.ymin AS bbox_ymin,
+                bbox.xmax AS bbox_xmax,
+                bbox.ymax AS bbox_ymax,
+                geometry AS geometry_wkb
+            FROM read_parquet(?, hive_partitioning=1)
+            WHERE
+                bbox.xmin <= ?
+                AND bbox.xmax >= ?
+                AND bbox.ymin <= ?
+                AND bbox.ymax >= ?
+                {height_filter}
+        """
+
+        df = con.execute(
+            query,
+            [path, max_lon, min_lon, max_lat, min_lat],
+        ).fetchdf()
+    finally:
+        if owns_connection:
+            con.close()
+
+    if df.empty:
+        return gpd.GeoDataFrame(
+            df.drop(columns=["geometry_wkb"], errors="ignore"),
+            geometry=[],
+            crs="EPSG:4326",
+        )
+
+    geometry_wkb = df.pop("geometry_wkb").map(_duckdb_wkb_to_bytes)
+    geometry = gpd.GeoSeries.from_wkb(geometry_wkb, crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
+
+    # The bbox predicate is intentionally broad for Parquet pruning. Do an exact
+    # geometry intersection locally before returning candidates for footprint
+    # matching.
+    aoi = box(min_lon, min_lat, max_lon, max_lat)
+    gdf = gdf[gdf.intersects(aoi)].copy()
+
+    if target_crs is not None and not gdf.empty:
+        gdf = gdf.to_crs(target_crs)
+
+    logger.info("Loaded %d Overture building candidates", len(gdf))
+    return gdf
+
+
+def lookup_overture_height(
+    building_polygon: BaseGeometry,
+    overture_buildings: gpd.GeoDataFrame,
+    *,
+    min_iou: float = 0.3,
+    min_coverage: float = 0.5,
+    floor_height_m: float = 3.5,
+    use_num_floors: bool = True,
+    use_height: bool = True,
+    return_match: bool = False,
+) -> Union[Optional[float], Tuple[Optional[float], Optional[Dict[str, object]]]]:
+    """
+    Match one local building footprint to Overture candidates and return a height.
+
+    ``building_polygon`` and ``overture_buildings`` must already be in the same
+    CRS. In ``Scene``, that means calling ``load_overture_buildings_for_aoi``
+    with ``target_crs=projection_UTM_EPSG_code`` before entering the OSM
+    building loop.
+
+    The match accepts a candidate when either:
+      * intersection-over-union is at least ``min_iou``; or
+      * the candidate covers at least ``min_coverage`` of the OSM footprint.
+
+    Parameters
+    ----------
+    building_polygon
+        OSM building footprint in the same CRS as ``overture_buildings``.
+    overture_buildings
+        GeoDataFrame returned by ``load_overture_buildings_for_aoi``.
+    min_iou
+        Minimum intersection-over-union needed for a match.
+    min_coverage
+        Minimum fraction of the OSM footprint covered by the candidate.
+    floor_height_m
+        Height per floor used when Overture has ``num_floors`` but no explicit
+        ``height``.
+    use_num_floors
+        If true, use ``num_floors * floor_height_m`` as a fallback height.
+    use_height
+        If true, use explicit Overture ``height`` values.
+    return_match
+        If true, return ``(height, metadata)``. Otherwise return just height.
+
+    Returns
+    -------
+    float or None
+        Building height in meters when a matching Overture candidate has a
+        usable height; otherwise None.
+    """
+
+    no_match = (None, None) if return_match else None
+    if building_polygon is None or building_polygon.is_empty:
+        return no_match
+    if overture_buildings is None or len(overture_buildings) == 0:
+        return no_match
+    if "geometry" not in overture_buildings:
+        return no_match
+
+    building_area = building_polygon.area
+    if building_area <= 0:
+        return no_match
+
+    candidate_idx = overture_buildings.sindex.query(
+        building_polygon,
+        predicate="intersects",
     )
-    # Typically, the first element is the most relevant match
-    utm_crs = pyproj.CRS.from_epsg(utm_crs_list[0].code)
-    return utm_crs
+    if len(candidate_idx) == 0:
+        return no_match
+
+    best = None
+    candidates = overture_buildings.iloc[candidate_idx]
+    for row_idx, row in candidates.iterrows():
+        candidate_geom = row.geometry
+        if candidate_geom is None or candidate_geom.is_empty:
+            continue
+
+        intersection_area = building_polygon.intersection(candidate_geom).area
+        if intersection_area <= 0:
+            continue
+
+        candidate_area = candidate_geom.area
+        union_area = building_area + candidate_area - intersection_area
+        if candidate_area <= 0 or union_area <= 0:
+            continue
+
+        iou = intersection_area / union_area
+        building_coverage = intersection_area / building_area
+        candidate_coverage = intersection_area / candidate_area
+        if iou < min_iou and building_coverage < min_coverage:
+            continue
+
+        height, source = _height_from_overture_row(
+            row,
+            floor_height_m=floor_height_m,
+            use_height=use_height,
+            use_num_floors=use_num_floors,
+        )
+        if height is None:
+            continue
+
+        # Prefer explicit Overture heights over floor-derived estimates, then
+        # prefer the strongest geometric match.
+        score = (
+            1 if source == "height" else 0,
+            iou,
+            building_coverage,
+            candidate_coverage,
+            intersection_area,
+        )
+        if best is None or score > best["score"]:
+            best = {
+                "height": height,
+                "score": score,
+                "metadata": {
+                    "overture_id": row.get("id"),
+                    "height_source": source,
+                    "height": height,
+                    "iou": iou,
+                    "building_coverage": building_coverage,
+                    "candidate_coverage": candidate_coverage,
+                    "intersection_area": intersection_area,
+                    "row_index": row_idx,
+                },
+            }
+
+    if best is None:
+        return no_match
+    if return_match:
+        return best["height"], best["metadata"]
+    return best["height"]
 
 
-def gps_to_utm_xy(lon: float, lat: float, utm_epsg):
+def resolve_building_height(
+    building: dict,
+    building_polygon: BaseGeometry,
+    *,
+    hag_handler=None,
+    to_4326=None,
+    overture_buildings: Optional[gpd.GeoDataFrame] = None,
+    overture_height: Optional[float] = None,
+    floor_height_m: float = 3.5,
+    hag_sample_count: int = 30,
+    min_hag_height_m: float = 2.0,
+    use_overture_num_floors: bool = True,
+    use_osm_levels: bool = True,
+    height_priority: str = HEIGHT_PRIORITY_OVERTURE_FIRST,
+    return_source: bool = False,
+) -> Union[float, Tuple[float, Dict[str, object]]]:
     """
-    Convert GPS coordinates (longitude, latitude) in WGS84 to UTM coordinates.
+    Resolve the extrusion height for one building footprint.
 
-    Parameters:
-    ----------
-    lon : float
-        Longitude in decimal degrees (WGS84).
-    lat : float
-        Latitude in decimal degrees (WGS84).
-    utm_epsg : int
-        The EPSG code for the desired UTM zone (e.g., 32633).
+    ``height_priority`` controls the order after LiDAR HAG samples:
 
-    Returns:
-    -------
-    (utm_x, utm_y, epsg_code) : (float, float, int)
-        utm_x  : easting in the specified UTM zone
-        utm_y  : northing in the specified UTM zone
-        epsg_code : same as the input `utm_epsg`, returned for convenience
-    """
-
-    # Create a transformer from WGS84 (EPSG:4326) to the specified UTM zone
-    transformer = Transformer.from_crs("EPSG:4326", utm_epsg, always_xy=True)
-
-    # Transform (longitude, latitude) into (easting, northing) in the UTM zone
-    utm_x, utm_y = transformer.transform(lon, lat)
-
-    # Return the results, including the EPSG code for clarity
-    return (utm_x, utm_y, utm_epsg)
-
-
-def rect_from_point_and_size(
-    lon: float,
-    lat: float,
-    position: str,
-    width: float,
-    height: float
-) -> List[Tuple[float, float]]:
-    """
-    Create a rectangular polygon (as a list of coordinates) given a GPS point and
-    desired rectangle size in a UTM projection.
-
-    :param lon: Longitude of the reference point (in EPSG:4326).
-    :param lat: Latitude of the reference point (in EPSG:4326).
-    :param position: One of the following strings:
-                     ["top-left", "top-right", "bottom-left", "bottom-right", "center"]
-                     indicating how (lon, lat) is interpreted relative to the rectangle.
-    :param width:  The width of the rectangle in UTM projection units (e.g., meters).
-    :param height: The height of the rectangle in UTM projection units (e.g., meters).
-    :return:       A list of (longitude, latitude) coordinates (EPSG:4326)
-                   forming the rectangle boundary. The last point is repeated
-                   to close the polygon.
-
-    .. note::
-       This function currently does NOT handle edge cases such as crossing
-       the International Date Line or spanning multiple UTM zones. Those must
-       be addressed separately.
-    """
-
-    # TODO: Check for the coner case such as rossing the International Date Line at ±180°, crossing multiple UTM zones
-
-
-    # Get the UTM EPSG code based on the given longitude/latitude.
-    utm_epsg = get_utm_epsg_code_from_gps(lon, lat)
-
-    # Convert the reference GPS point to UTM (x, y).
-    point_utm = gps_to_utm_xy(lon, lat, utm_epsg)
-
-
-    # Prepare a transformer to go from UTM back to EPSG:4326.
-    transformer = Transformer.from_crs(utm_epsg, "EPSG:4326", always_xy=True)
-
-
-    if position == "top-left":
-        min_lon_left = point_utm[0]
-        max_lon_right = point_utm[0] + width
-        max_lat_top = point_utm[1]
-        min_lat_bottom = point_utm[1] - height
-
-
-
-        
-    elif position == "top-right":
-
-        min_lon_left = point_utm[0] - width
-        max_lon_right = point_utm[0] 
-        max_lat_top = point_utm[1]
-        min_lat_bottom = point_utm[1] - height
-
-
-    
-    elif position == "bottom-right":
-
-        min_lon_left = point_utm[0] - width
-        max_lon_right = point_utm[0] 
-        max_lat_top = point_utm[1] + height
-        min_lat_bottom = point_utm[1]
-
-
-    elif position == "bottom-left":
-
-        min_lon_left = point_utm[0]
-        max_lon_right = point_utm[0] + width
-        max_lat_top = point_utm[1] + height
-        min_lat_bottom = point_utm[1] 
-
-
-    elif position == "center":
-        min_lon_left = point_utm[0] - width/2
-        max_lon_right = point_utm[0] + width/2
-        max_lat_top = point_utm[1] + height/2
-        min_lat_bottom = point_utm[1] - height/2
-
-
-    else:
-        raise ValueError(f"Unknown position: {position}. "
-                         "Must be one of [top-left, top-right, bottom-left, bottom-right, center].")
-    
-        
-
-
-    points_utm = [
-            [min_lon_left, min_lat_bottom], 
-            [min_lon_left, max_lat_top],
-            [max_lon_right, max_lat_top],
-            [max_lon_right, min_lat_bottom],
-            [min_lon_left, min_lat_bottom]
-        ]
-
-
-    points_gps = [transformer.transform(x, y) for x, y in points_utm]
-    return points_gps
-
-# -------------------------------------------------------------------
-# 2) Polygon/Coordinates Related
-# -------------------------------------------------------------------
-def round_polygon_coordinates(polygon: Polygon, decimal_places: int = 0) -> Polygon:
-    """
-    Round the exterior and interior coordinates of a single Polygon to the specified
-    number of decimal places.
+    ``"no-overture"``
+        OSM explicit height tags, OSM floor-count tags, then random fallback.
+    ``"overture-first"``
+        Overture explicit height, Overture floor count, OSM explicit height
+        tags, OSM floor-count tags, then random fallback.
+    ``"osm-first"``
+        OSM explicit height tags, Overture explicit height, OSM floor-count
+        tags, Overture floor count, then random fallback.
 
     Parameters
     ----------
-    polygon : Polygon
-        A shapely Polygon whose coordinates should be rounded.
-    decimal_places : int, optional
-        Number of decimal places to round to (default 0 = integer rounding).
-
-    Returns
-    -------
-    Polygon
-        A new Polygon with rounded exterior and interior coordinates.
+    building
+        OSM building record from ``GeoDataFrame.to_dict("records")``.
+    building_polygon
+        OSM building footprint in the scene's projected CRS.
+    hag_handler
+        Optional ``GeoTIFFHandler`` used for LiDAR height-above-ground samples.
+    to_4326
+        Transformer from the scene CRS to EPSG:4326. Required with
+        ``hag_handler`` because ``GeoTIFFHandler.query`` expects GPS coords.
+    overture_buildings
+        Optional Overture candidates in the same CRS as ``building_polygon``.
+    overture_height
+        Optional precomputed Overture height in meters. If supplied, it is used
+        before querying ``overture_buildings``.
+    height_priority
+        One of ``"no-overture"``, ``"overture-first"``, or ``"osm-first"``.
+    return_source
+        If true, return ``(height, metadata)``. Otherwise return just height.
     """
-    rounded_exterior = LinearRing([
-        (round(x, decimal_places), round(y, decimal_places))
-        for x, y in polygon.exterior.coords
-    ])
-    rounded_interiors = [
-        LinearRing([
-            (round(x, decimal_places), round(y, decimal_places))
-            for x, y in interior.coords
-        ])
-        for interior in polygon.interiors
-    ]
-    return Polygon(rounded_exterior, rounded_interiors)
 
-def round_geometry_coords(geometry, decimal_places: int = 0):
-    """
-    Round the coordinates of a geometry (Polygon or MultiPolygon) to the
-    specified number of decimal places.
+    height = _height_from_hag(
+        building_polygon,
+        hag_handler=hag_handler,
+        to_4326=to_4326,
+        sample_count=hag_sample_count,
+        min_height_m=min_hag_height_m,
+    )
+    if height is not None:
+        return _height_result(height, "hag", return_source)
 
-    Parameters
-    ----------
-    geometry : Polygon or MultiPolygon
-        Shapely geometry whose coordinates should be rounded.
-    decimal_places : int, optional
-        Number of decimal places for rounding (default 0 = integer).
+    height_priority = normalize_building_height_priority(height_priority)
 
-    Returns
-    -------
-    Polygon or MultiPolygon
-        The same geometry type with rounded coordinates.
-    """
-    if geometry.geom_type == 'Polygon':
-        return round_polygon_coordinates(geometry, decimal_places)
-    elif geometry.geom_type == 'MultiPolygon':
-        return MultiPolygon([
-            round_polygon_coordinates(poly, decimal_places)
-            for poly in geometry
-        ])
-    else:
-        # If not a Polygon or MultiPolygon, return unchanged
-        return geometry
+    for source_type in _height_priority_steps(height_priority, use_osm_levels):
+        height, source, metadata = _height_from_source(
+            source_type,
+            building,
+            building_polygon,
+            overture_buildings=overture_buildings,
+            overture_height=overture_height,
+            floor_height_m=floor_height_m,
+            use_overture_num_floors=use_overture_num_floors,
+        )
+        if height is not None:
+            return _height_result(height, source, return_source, metadata)
 
-def generate_random_points(poly: Polygon, num_points: int):
-    """
-    Generate a given number of random points that lie within the Polygon (including holes).
-
-    Parameters
-    ----------
-    poly : Polygon
-        The polygon in which to generate random points.
-    num_points : int
-        Number of random points to generate.
-
-    Returns
-    -------
-    list of Point
-        A list of shapely Point objects within the polygon.
-    """
-    min_x, min_y, max_x, max_y = poly.bounds
-    points = []
-    while len(points) < num_points:
-        rand_x = np.random.uniform(min_x, max_x)
-        rand_y = np.random.uniform(min_y, max_y)
-        random_point = Point(rand_x, rand_y)
-        if random_point.within(poly):
-            points.append(random_point)
-    return points
-
-def unique_coords(input_coords):
-    """
-    Given a list of (x, y) coordinates, return a new list with duplicate
-    coordinates removed, preserving the original order of first occurrences.
-
-    Parameters
-    ----------
-    input_coords : list of (float, float)
-        A list of 2D coordinate pairs.
-
-    Returns
-    -------
-    list of (float, float)
-        The same coordinates but with duplicates removed in order of appearance.
-    """
-    unique_coords_res = []
-    seen_coords = set()
-    for coord in input_coords:
-        if coord not in seen_coords:
-            unique_coords_res.append(coord)
-            seen_coords.add(coord)
-    return unique_coords_res
-
-def reorder_localize_coords(input_coords, center_x: float, center_y: float):
-    """
-    Reverse coordinates if polygon is counterclockwise, then translate
-    them relative to a given center.
-
-    Parameters
-    ----------
-    input_coords : LinearRing or Sequence of coordinates
-        A shapely LinearRing or any sequence of (x, y) coords.
-        Must support `.is_ccw` and `.reverse()`, or adapt as needed.
-    center_x : float
-        X coordinate to translate from.
-    center_y : float
-        Y coordinate to translate from.
-
-    Returns
-    -------
-    list of (float, float)
-        The re-ordered, localized (translated) coordinates.
-    """
-    # If the ring is in CCW order, reverse it so we have consistent winding
-    if hasattr(input_coords, "is_ccw") and input_coords.is_ccw:
-        input_coords.reverse()
-
-    # Translate coords to local origin at (center_x, center_y)
-    res_coords = [
-        (coord[0] - center_x, coord[1] - center_y)
-        for coord in list(input_coords.coords)
-    ]
-    return res_coords
-
-def random_building_height(building: dict, building_polygon: Polygon) -> float:
-    """
-    Determine a building's height from OSM tags if available, else random.
-
-    Parameters
-    ----------
-    building : dict
-        A record (row) from an OSM data source containing building attributes,
-        e.g. 'building:height', 'height', 'building:levels', etc.
-    building_polygon : Polygon
-        The polygon geometry of this building (unused in this function's fallback).
-
-    Returns
-    -------
-    float
-        The estimated building height in meters.
-    """
-    if 'building:height' in building and is_float(building['building:height']):
-        building_height = float(building['building:height'])
-    elif 'height' in building and is_float(building['height']):
-        building_height = float(building['height'])
-    elif 'building:levels' in building and is_float(building['building:levels']):
-        building_height = float(building['building:levels']) * 3.5
-    elif 'level' in building and is_float(building['level']):
-        building_height = float(building['level']) * 3.5
-    else:
-        # Fallback random height (units: meters)
-        building_height = 3.5 * max(1, min(15, int(np.random.normal(loc=5, scale=1))))
-
-    return building_height
+    height = _random_fallback_height(floor_height_m)
+    return _height_result(height, "fallback:random", return_source)
 
 
+def _normalize_bbox_4326(bbox_4326: Sequence[float]) -> Tuple[float, float, float, float]:
+    if len(bbox_4326) != 4:
+        raise ValueError("bbox_4326 must contain (min_lon, min_lat, max_lon, max_lat)")
 
-def get_center_subarray(arr, x, y):
-    """
-    Extracts the center subarray of size (x, y) from a 2D NumPy array.
-    
-    Parameters:
-    - arr: 2D NumPy array
-    - x: Number of rows in the subarray
-    - y: Number of columns in the subarray
-    
-    Returns:
-    - Center subarray of shape (x, y)
-    """
-    H, W = arr.shape  # Get original array size
-    
-    # Compute starting indices
-    start_x = (H - x) // 2
-    start_y = (W - y) // 2
-    
-    # Extract the subarray
-    return arr[start_x : start_x + x, start_y : start_y + y]
+    min_lon, min_lat, max_lon, max_lat = [float(v) for v in bbox_4326]
+    if min_lon > max_lon:
+        min_lon, max_lon = max_lon, min_lon
+    if min_lat > max_lat:
+        min_lat, max_lat = max_lat, min_lat
+
+    if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0):
+        raise ValueError("bbox longitudes must be in EPSG:4326 degrees")
+    if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0):
+        raise ValueError("bbox latitudes must be in EPSG:4326 degrees")
+
+    return min_lon, min_lat, max_lon, max_lat
 
 
-
-def error_tolerance_rate(y_true, y_pred, threshold, relative=False):
-    """
-    Computes the percentage of predictions that fall within a specified error threshold.
-
-    This function calculates the proportion of predictions that have errors within the given threshold,
-    supporting both absolute and relative error calculations.
-
-    Parameters:
-    ----------
-    y_true : np.ndarray
-        Array of actual (ground truth) values.
-    y_pred : np.ndarray
-        Array of predicted values.
-    threshold : float
-        The maximum allowed error for a prediction to be considered within tolerance.
-    relative : bool, optional (default=False)
-        If True, computes relative errors (normalized by `y_true`). If False, uses absolute errors.
-
-    Returns:
-    -------
-    float
-        The percentage of predictions within the specified error tolerance.
-    
-    Notes:
-    ------
-    - If `relative=True`, zero values in `y_true` are ignored to avoid division by zero.
-    - The function returns a percentage (0 to 100) rather than a fraction.
-    """
-    
-    if relative:
-        # Mask to exclude zero values in `y_true` to prevent division by zero
-        valid_mask = (y_true != 0)
-        y_true = y_true[valid_mask]
-        y_pred = y_pred[valid_mask]
-
-        # Compute relative errors
-        errors = np.abs((y_true - y_pred) / y_true)
-    else:
-        # Compute absolute errors
-        errors = np.abs(y_true - y_pred)
-
-    # Count predictions within the specified error threshold
-    within_tolerance = np.sum(errors <= threshold)
-
-    # Return the percentage of values within tolerance
-    return (within_tolerance / len(y_true)) * 100 if len(y_true) > 0 else 0.0
+def _overture_buildings_path(release: str, source: str) -> str:
+    if source == "s3":
+        return OVERTURE_BUILDINGS_S3_TEMPLATE.format(release=release)
+    if source == "azure":
+        return OVERTURE_BUILDINGS_AZURE_TEMPLATE.format(release=release)
+    raise ValueError("source must be 's3' or 'azure'")
 
 
+def _get_duckdb_connection(duckdb_connection):
+    if duckdb_connection is not None:
+        return duckdb_connection, False
 
-def is_float(element) -> bool:
-    """
-    Check if `element` can be safely cast to a float and is not NaN or inf.
-
-    Parameters
-    ----------
-    element : any
-        The value to check.
-
-    Returns
-    -------
-    bool
-        True if element is a valid float, otherwise False.
-    """
-    if element is None:
-        return False
     try:
-        val = float(element)
-        return not (math.isnan(val) or math.isinf(val))
-    except (TypeError, ValueError):
-        return False
+        import duckdb
+    except ImportError as exc:
+        raise ImportError(
+            "load_overture_buildings_for_aoi requires duckdb. "
+            "Install it with `pip install duckdb`."
+        ) from exc
+
+    return duckdb.connect(database=":memory:"), True
 
 
-def print_if_int(num):
-  """Prints the number as an integer if it's an integer, otherwise prints the original number."""
-  if math.isclose(num, int(num)):
-    return  int(num)
-  else:
-    return num
-  
-
-class GeoTIFFHandler:
-    """
-    Class for opening and querying a GeoTIFF file for height (HAG, DEM, etc.).
-    """
-    def __init__(self, filepath: str):
-        """
-        Parameters
-        ----------
-        filepath : str
-            Path to the GeoTIFF file.
-        """
-        self.filepath = filepath
-        self.src = self._open_geotiff()
-
-    def _open_geotiff(self):
-        """
-        Open the rasterio dataset from the given file.
-
-        Returns
-        -------
-        rasterio.io.DatasetReader
-            An open raster dataset.
-        """
-        return rasterio.open(self.filepath)
-
-    def get_info(self):
-        """
-        Print or return some metadata info about the GeoTIFF.
-        This includes bounds, nodata values, CRS, etc.
-        """
-        logger.info("Metadata: %s", self.src.meta)
-        logger.info("NoData Value: %s", self.src.nodatavals)
-
-        bounds = self.src.bounds
-        gps_bounds = transform_bounds(
-            self.src.crs, "EPSG:4326",
-            bounds.left, bounds.bottom,
-            bounds.right, bounds.top
-        )
-        logger.info(
-            "GPS Bounds [lon_min, lat_min, lon_max, lat_max]: %s", gps_bounds
-        )
-
-    def query(self, gps_coordinate, reverse_xy: bool = False):
-        """
-        Query the GeoTIFF for height data at the given GPS coordinate.
-
-        Parameters
-        ----------
-        gps_coordinate : (float, float)
-            (longitude, latitude) in decimal degrees. Or (lat, lon) if reverse_xy is True.
-        reverse_xy : bool, optional
-            If True, interpret gps_coordinate as (lat, lon).
-
-        Returns
-        -------
-        float or np.ndarray
-            The height value(s) from the raster at the nearest pixel.
-        """
-        if reverse_xy:
-            gps_coordinate = (gps_coordinate[1], gps_coordinate[0])
-
-        # Transform from WGS84 to raster's CRS
-        transformed_coordinates = transform(
-            {'init': 'epsg:4326'}, self.src.crs,
-            [gps_coordinate[0]], [gps_coordinate[1]]
-        )
-        x, y = transformed_coordinates[0][0], transformed_coordinates[1][0]
-
-        # Convert to pixel row/col
-        row, col = self.src.index(x, y)
-
-        # Read the single pixel at (row, col)
-        hag_value = self.src.read(
-            1,
-            window=rasterio.windows.Window(col, row, 1, 1),
-            resampling=Resampling.nearest
-        )
-        return hag_value.squeeze()
-
-    def __del__(self):
-        """
-        Ensure the dataset is closed when the object is deleted.
-        """
+def _load_duckdb_extensions(con) -> None:
+    # INSTALL is harmless when an extension is already present, and LOAD is
+    # needed for cloud-backed Parquet reads and spatial SQL.
+    for extension in ("httpfs", "spatial"):
         try:
-            self.src.close()
-        except AttributeError:
-            pass
+            con.execute(f"INSTALL {extension}")
+        except Exception as exc:
+            logger.debug(
+                "DuckDB INSTALL %s failed or was unnecessary: %s",
+                extension,
+                exc,
+            )
+        con.execute(f"LOAD {extension}")
+
+
+def _duckdb_wkb_to_bytes(value):
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    return value
+
+
+def _height_from_overture_row(
+    row,
+    *,
+    floor_height_m: float,
+    use_height: bool,
+    use_num_floors: bool,
+) -> Tuple[Optional[float], Optional[str]]:
+    if use_height:
+        explicit_height = _positive_float(row.get("height"))
+        if explicit_height is not None:
+            return explicit_height, "height"
+
+    if use_num_floors:
+        num_floors = _positive_float(row.get("num_floors"))
+        if num_floors is not None:
+            return num_floors * floor_height_m, "num_floors"
+
+    return None, None
+
+
+def _height_priority_steps(height_priority: str, use_osm_levels: bool) -> Sequence[str]:
+    if height_priority == HEIGHT_PRIORITY_NO_OVERTURE:
+        steps = ["osm_explicit"]
+        if use_osm_levels:
+            steps.append("osm_levels")
+        return steps
+
+    if height_priority == HEIGHT_PRIORITY_OVERTURE_FIRST:
+        steps = ["overture_height", "overture_levels", "osm_explicit"]
+        if use_osm_levels:
+            steps.append("osm_levels")
+        return steps
+
+    if height_priority == HEIGHT_PRIORITY_OSM_FIRST:
+        steps = ["osm_explicit", "overture_height"]
+        if use_osm_levels:
+            steps.append("osm_levels")
+        steps.append("overture_levels")
+        return steps
+
+    raise ValueError(f"Unsupported building height priority: {height_priority}")
+
+
+def _height_from_source(
+    source_type: str,
+    building: dict,
+    building_polygon: BaseGeometry,
+    *,
+    overture_buildings: Optional[gpd.GeoDataFrame],
+    overture_height: Optional[float],
+    floor_height_m: float,
+    use_overture_num_floors: bool,
+) -> Tuple[Optional[float], Optional[str], Optional[Dict[str, object]]]:
+    if source_type == "osm_explicit":
+        height, source = _explicit_height_from_osm(building)
+        return height, source, None
+
+    if source_type == "osm_levels":
+        height, source = _height_from_osm_levels(building, floor_height_m)
+        return height, source, None
+
+    if source_type == "overture_height":
+        height = _positive_float(overture_height)
+        if height is not None:
+            return height, "overture:height", None
+        return _lookup_overture_height_source(
+            building_polygon,
+            overture_buildings,
+            floor_height_m=floor_height_m,
+            use_height=True,
+            use_num_floors=False,
+        )
+
+    if source_type == "overture_levels":
+        if not use_overture_num_floors:
+            return None, None, None
+        return _lookup_overture_height_source(
+            building_polygon,
+            overture_buildings,
+            floor_height_m=floor_height_m,
+            use_height=False,
+            use_num_floors=True,
+        )
+
+    raise ValueError(f"Unsupported building height source: {source_type}")
+
+
+def _lookup_overture_height_source(
+    building_polygon: BaseGeometry,
+    overture_buildings: Optional[gpd.GeoDataFrame],
+    *,
+    floor_height_m: float,
+    use_height: bool,
+    use_num_floors: bool,
+) -> Tuple[Optional[float], Optional[str], Optional[Dict[str, object]]]:
+    if overture_buildings is None:
+        return None, None, None
+
+    height, match = lookup_overture_height(
+        building_polygon,
+        overture_buildings,
+        floor_height_m=floor_height_m,
+        use_height=use_height,
+        use_num_floors=use_num_floors,
+        return_match=True,
+    )
+    if height is None:
+        return None, None, None
+
+    source = f"overture:{match['height_source']}"
+    return height, source, match
+
+
+def _height_from_hag(
+    building_polygon: BaseGeometry,
+    *,
+    hag_handler,
+    to_4326,
+    sample_count: int,
+    min_height_m: float,
+) -> Optional[float]:
+    if hag_handler is None or to_4326 is None:
+        return None
+    if building_polygon is None or building_polygon.is_empty:
+        return None
+
+    try:
+        random_points = generate_random_points(building_polygon, sample_count)
+    except Exception as exc:
+        logger.debug("Unable to sample HAG points for building: %s", exc)
+        return None
+
+    heights = []
+    for point in random_points:
+        try:
+            value = hag_handler.query(to_4326.transform(point.x, point.y), False)
+        except Exception as exc:
+            logger.debug("Unable to query HAG value for building point: %s", exc)
+            continue
+
+        numeric_value = _positive_float(np.asarray(value).squeeze())
+        if numeric_value is not None and numeric_value > min_height_m:
+            heights.append(numeric_value)
+
+    if not heights:
+        return None
+
+    height = float(np.mean(heights))
+    if math.isnan(height) or math.isinf(height):
+        return None
+    return height
+
+
+def _explicit_height_from_osm(building: dict) -> Tuple[Optional[float], Optional[str]]:
+    for key in ("building:height", "height"):
+        height = _height_value_to_meters(building.get(key))
+        if height is not None:
+            return height, f"osm:{key}"
+    return None, None
+
+
+def _height_from_osm_levels(
+    building: dict,
+    floor_height_m: float,
+) -> Tuple[Optional[float], Optional[str]]:
+    for key in ("building:levels", "levels"):
+        levels = _positive_float(building.get(key))
+        if levels is not None:
+            return levels * floor_height_m, f"osm:{key}"
+    return None, None
+
+
+def _height_value_to_meters(value) -> Optional[float]:
+    if value is None:
+        return None
+
+    numeric_value = _positive_float(value)
+    if numeric_value is not None:
+        return numeric_value
+
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip().lower().replace(",", ".")
+    if not normalized:
+        return None
+
+    match = re.search(r"[-+]?\d*\.?\d+", normalized)
+    if not match:
+        return None
+
+    numeric_value = _positive_float(match.group(0))
+    if numeric_value is None:
+        return None
+
+    if "ft" in normalized or "feet" in normalized or "foot" in normalized:
+        return numeric_value * 0.3048
+    return numeric_value
+
+
+def _random_fallback_height(floor_height_m: float) -> float:
+    floors = max(1, min(15, int(np.random.normal(loc=5, scale=1))))
+    return floor_height_m * floors
+
+
+def _height_result(
+    height: float,
+    source: str,
+    return_source: bool,
+    metadata: Optional[Dict[str, object]] = None,
+) -> Union[float, Tuple[float, Dict[str, object]]]:
+    if not return_source:
+        return height
+
+    result = {"source": source, "height": height}
+    if metadata:
+        result.update(metadata)
+    return height, result
+
+
+def _positive_float(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(numeric_value) or math.isinf(numeric_value) or numeric_value <= 0:
+        return None
+    return numeric_value

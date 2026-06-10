@@ -35,39 +35,27 @@ OVERTURE_BUILDINGS_AZURE_TEMPLATE = (
     "{release}/theme=buildings/type=building/*"
 )
 
-HEIGHT_PRIORITY_NO_OVERTURE = "no-overture"
-HEIGHT_PRIORITY_OVERTURE_FIRST = "overture-first"
-HEIGHT_PRIORITY_OSM_FIRST = "osm-first"
-BUILDING_HEIGHT_PRIORITY_OPTIONS = (
-    HEIGHT_PRIORITY_NO_OVERTURE,
-    HEIGHT_PRIORITY_OVERTURE_FIRST,
-    HEIGHT_PRIORITY_OSM_FIRST,
+HEIGHT_MODE_LIDAR_OSM = "lidar-osm"
+HEIGHT_MODE_OVERTURE = "overture"
+BUILDING_HEIGHT_MODE_OPTIONS = (
+    HEIGHT_MODE_LIDAR_OSM,
+    HEIGHT_MODE_OVERTURE,
 )
-_HEIGHT_PRIORITY_ALIASES = {
-    "1": HEIGHT_PRIORITY_NO_OVERTURE,
-    "none": HEIGHT_PRIORITY_NO_OVERTURE,
-    "no": HEIGHT_PRIORITY_NO_OVERTURE,
-    "off": HEIGHT_PRIORITY_NO_OVERTURE,
-    "false": HEIGHT_PRIORITY_NO_OVERTURE,
-    "no-overture": HEIGHT_PRIORITY_NO_OVERTURE,
-    "osm-only": HEIGHT_PRIORITY_NO_OVERTURE,
-    "2": HEIGHT_PRIORITY_OVERTURE_FIRST,
-    "overture": HEIGHT_PRIORITY_OVERTURE_FIRST,
-    "overture-first": HEIGHT_PRIORITY_OVERTURE_FIRST,
-    "overture-over-osm": HEIGHT_PRIORITY_OVERTURE_FIRST,
-    "3": HEIGHT_PRIORITY_OSM_FIRST,
-    "osm-first": HEIGHT_PRIORITY_OSM_FIRST,
-    "osm-explicit-first": HEIGHT_PRIORITY_OSM_FIRST,
-    "osm-explicit-over-overture": HEIGHT_PRIORITY_OSM_FIRST,
+
+_HEIGHT_MODE_ALIASES = {
+    "1": HEIGHT_MODE_LIDAR_OSM,
+    "lidar-osm": HEIGHT_MODE_LIDAR_OSM,
+    "2": HEIGHT_MODE_OVERTURE,
+    "overture": HEIGHT_MODE_OVERTURE,
 }
 
 
-def normalize_building_height_priority(priority: str) -> str:
-    normalized = _HEIGHT_PRIORITY_ALIASES.get(str(priority).strip().lower())
+def normalize_building_height_mode(mode: str) -> str:
+    normalized = _HEIGHT_MODE_ALIASES.get(str(mode).strip().lower())
     if normalized is None:
-        valid = ", ".join(BUILDING_HEIGHT_PRIORITY_OPTIONS)
+        valid = ", ".join(BUILDING_HEIGHT_MODE_OPTIONS)
         raise ValueError(
-            f"Invalid building height priority '{priority}'. Valid values: {valid}"
+            f"Invalid building height mode '{mode}'. Valid values: {valid}"
         )
     return normalized
 
@@ -91,7 +79,7 @@ def load_overture_buildings_for_aoi(
         Bounding box in ``(min_lon, min_lat, max_lon, max_lat)`` order.
     target_crs
         Optional CRS to reproject the returned GeoDataFrame into. Pass the
-        scene's UTM CRS when matching against OSM footprints inside ``Scene``.
+        scene's UTM CRS when creating local meshes.
     release
         Overture release string used when ``parquet_path`` is not supplied.
     source
@@ -102,7 +90,7 @@ def load_overture_buildings_for_aoi(
         at the Overture buildings GeoParquet partition.
     require_height
         If true, keep only rows with a positive explicit ``height`` value.
-        Leave false if you also want to use ``num_floors`` as a fallback.
+        Leave false if you also want to use floor counts as a fallback.
     duckdb_connection
         Optional existing DuckDB connection, mostly useful for tests.
 
@@ -199,29 +187,27 @@ def lookup_overture_height(
     Match one local building footprint to Overture candidates and return a height.
 
     ``building_polygon`` and ``overture_buildings`` must already be in the same
-    CRS. In ``Scene``, that means calling ``load_overture_buildings_for_aoi``
-    with ``target_crs=projection_UTM_EPSG_code`` before entering the OSM
-    building loop.
+    CRS.
 
     The match accepts a candidate when either:
       * intersection-over-union is at least ``min_iou``; or
-      * the candidate covers at least ``min_coverage`` of the OSM footprint.
+      * the candidate covers at least ``min_coverage`` of the local footprint.
 
     Parameters
     ----------
     building_polygon
-        OSM building footprint in the same CRS as ``overture_buildings``.
+        Local building footprint in the same CRS as ``overture_buildings``.
     overture_buildings
         GeoDataFrame returned by ``load_overture_buildings_for_aoi``.
     min_iou
         Minimum intersection-over-union needed for a match.
     min_coverage
-        Minimum fraction of the OSM footprint covered by the candidate.
+        Minimum fraction of the local footprint covered by the candidate.
     floor_height_m
-        Height per floor used when Overture has ``num_floors`` but no explicit
-        ``height``.
+        Height per floor used when Overture has floor-count metadata but no
+        explicit ``height``.
     use_num_floors
-        If true, use ``num_floors * floor_height_m`` as a fallback height.
+        If true, use Overture levels times ``floor_height_m`` as a fallback height.
     use_height
         If true, use explicit Overture ``height`` values.
     return_match
@@ -322,71 +308,63 @@ def resolve_building_height(
     *,
     hag_handler=None,
     to_4326=None,
-    overture_buildings: Optional[gpd.GeoDataFrame] = None,
-    overture_height: Optional[float] = None,
     floor_height_m: float = 3.5,
     hag_sample_count: int = 30,
     min_hag_height_m: float = 2.0,
     use_overture_num_floors: bool = True,
     use_osm_levels: bool = True,
-    height_priority: str = HEIGHT_PRIORITY_OVERTURE_FIRST,
+    height_mode: str = HEIGHT_MODE_LIDAR_OSM,
     return_source: bool = False,
 ) -> Union[float, Tuple[float, Dict[str, object]]]:
     """
     Resolve the extrusion height for one building footprint.
 
-    ``height_priority`` controls the order after LiDAR HAG samples:
+    ``height_mode`` controls the source hierarchy:
 
-    ``"no-overture"``
-        OSM explicit height tags, OSM floor-count tags, then random fallback.
-    ``"overture-first"``
-        Overture explicit height, Overture floor count, OSM explicit height
-        tags, OSM floor-count tags, then random fallback.
-    ``"osm-first"``
-        OSM explicit height tags, Overture explicit height, OSM floor-count
-        tags, Overture floor count, then random fallback.
+    ``"lidar-osm"`` or ``"1"``
+        LiDAR HAG sampling, OSM explicit height tags, OSM floor-count tags,
+        then random fallback.
+    ``"overture"`` or ``"2"``
+        Overture explicit height, Overture levels times ``floor_height_m``, then
+        random fallback.
 
     Parameters
     ----------
     building
-        OSM building record from ``GeoDataFrame.to_dict("records")``.
+        Building record from ``GeoDataFrame.to_dict("records")``. In
+        ``lidar-osm`` mode this is an OSM record. In ``overture`` mode this is
+        an Overture record.
     building_polygon
-        OSM building footprint in the scene's projected CRS.
+        Building footprint in the scene's projected CRS.
     hag_handler
         Optional ``GeoTIFFHandler`` used for LiDAR height-above-ground samples.
     to_4326
         Transformer from the scene CRS to EPSG:4326. Required with
         ``hag_handler`` because ``GeoTIFFHandler.query`` expects GPS coords.
-    overture_buildings
-        Optional Overture candidates in the same CRS as ``building_polygon``.
-    overture_height
-        Optional precomputed Overture height in meters. If supplied, it is used
-        before querying ``overture_buildings``.
-    height_priority
-        One of ``"no-overture"``, ``"overture-first"``, or ``"osm-first"``.
+    height_mode
+        One of ``"lidar-osm"`` or ``"overture"``. Numeric aliases ``"1"``
+        and ``"2"`` are also accepted.
     return_source
         If true, return ``(height, metadata)``. Otherwise return just height.
     """
 
-    height = _height_from_hag(
-        building_polygon,
-        hag_handler=hag_handler,
-        to_4326=to_4326,
-        sample_count=hag_sample_count,
-        min_height_m=min_hag_height_m,
-    )
-    if height is not None:
-        return _height_result(height, "hag", return_source)
+    height_mode = normalize_building_height_mode(height_mode)
 
-    height_priority = normalize_building_height_priority(height_priority)
+    if height_mode == HEIGHT_MODE_LIDAR_OSM:
+        height = _height_from_hag(
+            building_polygon,
+            hag_handler=hag_handler,
+            to_4326=to_4326,
+            sample_count=hag_sample_count,
+            min_height_m=min_hag_height_m,
+        )
+        if height is not None:
+            return _height_result(height, "hag", return_source)
 
-    for source_type in _height_priority_steps(height_priority, use_osm_levels):
+    for source_type in _height_mode_steps(height_mode, use_osm_levels):
         height, source, metadata = _height_from_source(
             source_type,
             building,
-            building_polygon,
-            overture_buildings=overture_buildings,
-            overture_height=overture_height,
             floor_height_m=floor_height_m,
             use_overture_num_floors=use_overture_num_floors,
         )
@@ -474,43 +452,31 @@ def _height_from_overture_row(
             return explicit_height, "height"
 
     if use_num_floors:
-        num_floors = _positive_float(row.get("num_floors"))
-        if num_floors is not None:
-            return num_floors * floor_height_m, "num_floors"
+        levels = _positive_float(row.get("levels"))
+        if levels is None:
+            levels = _positive_float(row.get("num_floors"))
+        if levels is not None:
+            return levels * floor_height_m, "levels"
 
     return None, None
 
 
-def _height_priority_steps(height_priority: str, use_osm_levels: bool) -> Sequence[str]:
-    if height_priority == HEIGHT_PRIORITY_NO_OVERTURE:
+def _height_mode_steps(height_mode: str, use_osm_levels: bool) -> Sequence[str]:
+    if height_mode == HEIGHT_MODE_LIDAR_OSM:
         steps = ["osm_explicit"]
         if use_osm_levels:
             steps.append("osm_levels")
         return steps
 
-    if height_priority == HEIGHT_PRIORITY_OVERTURE_FIRST:
-        steps = ["overture_height", "overture_levels", "osm_explicit"]
-        if use_osm_levels:
-            steps.append("osm_levels")
-        return steps
+    if height_mode == HEIGHT_MODE_OVERTURE:
+        return ["overture_height", "overture_levels"]
 
-    if height_priority == HEIGHT_PRIORITY_OSM_FIRST:
-        steps = ["osm_explicit", "overture_height"]
-        if use_osm_levels:
-            steps.append("osm_levels")
-        steps.append("overture_levels")
-        return steps
-
-    raise ValueError(f"Unsupported building height priority: {height_priority}")
-
+    raise ValueError(f"Unsupported building height mode: {height_mode}")
 
 def _height_from_source(
     source_type: str,
     building: dict,
-    building_polygon: BaseGeometry,
     *,
-    overture_buildings: Optional[gpd.GeoDataFrame],
-    overture_height: Optional[float],
     floor_height_m: float,
     use_overture_num_floors: bool,
 ) -> Tuple[Optional[float], Optional[str], Optional[Dict[str, object]]]:
@@ -523,55 +489,50 @@ def _height_from_source(
         return height, source, None
 
     if source_type == "overture_height":
-        height = _positive_float(overture_height)
-        if height is not None:
-            return height, "overture:height", None
-        return _lookup_overture_height_source(
-            building_polygon,
-            overture_buildings,
+        height, source = _height_from_overture_row(
+            building,
             floor_height_m=floor_height_m,
             use_height=True,
             use_num_floors=False,
         )
+        if height is not None:
+            return height, f"overture:{source}", _overture_row_metadata(
+                building,
+                source,
+                height,
+            )
+        return None, None, None
 
     if source_type == "overture_levels":
         if not use_overture_num_floors:
             return None, None, None
-        return _lookup_overture_height_source(
-            building_polygon,
-            overture_buildings,
+        height, source = _height_from_overture_row(
+            building,
             floor_height_m=floor_height_m,
             use_height=False,
             use_num_floors=True,
         )
+        if height is not None:
+            return height, f"overture:{source}", _overture_row_metadata(
+                building,
+                source,
+                height,
+            )
+        return None, None, None
 
     raise ValueError(f"Unsupported building height source: {source_type}")
 
 
-def _lookup_overture_height_source(
-    building_polygon: BaseGeometry,
-    overture_buildings: Optional[gpd.GeoDataFrame],
-    *,
-    floor_height_m: float,
-    use_height: bool,
-    use_num_floors: bool,
-) -> Tuple[Optional[float], Optional[str], Optional[Dict[str, object]]]:
-    if overture_buildings is None:
-        return None, None, None
-
-    height, match = lookup_overture_height(
-        building_polygon,
-        overture_buildings,
-        floor_height_m=floor_height_m,
-        use_height=use_height,
-        use_num_floors=use_num_floors,
-        return_match=True,
-    )
-    if height is None:
-        return None, None, None
-
-    source = f"overture:{match['height_source']}"
-    return height, source, match
+def _overture_row_metadata(
+    row,
+    height_source: str,
+    height: float,
+) -> Dict[str, object]:
+    return {
+        "overture_id": row.get("id"),
+        "height_source": height_source,
+        "height": height,
+    }
 
 
 def _height_from_hag(

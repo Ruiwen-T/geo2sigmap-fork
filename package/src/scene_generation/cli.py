@@ -16,7 +16,7 @@ import logging
 
 from argparse import ArgumentParser
 from .core import Scene
-from .overture_buildings import BUILDING_HEIGHT_PRIORITY_OPTIONS
+from .overture_buildings import BUILDING_HEIGHT_MODE_OPTIONS
 from .utils import (
     rect_from_point_and_size,
     print_if_int,
@@ -132,16 +132,18 @@ def main():
         help="Enable 2D building map output.",
     )
     common_parser.add_argument(
-        "--building-height-priority",
-        default="overture-first",
-        choices=[*BUILDING_HEIGHT_PRIORITY_OPTIONS, "1", "2", "3"],
+        "--building-height-mode",
+        default="1",
+        choices=[*BUILDING_HEIGHT_MODE_OPTIONS, "1", "2"],
         help=(
-            "Building height source order: "
-            "1/no-overture, 2/overture-first, or 3/osm-first. "
-            "Default: overture-first."
+            "Building height mode: "
+            "1/lidar-osm uses LiDAR HAG, OSM explicit heights, OSM levels, "
+            "then random fallback; 2/overture uses Overture footprints, "
+            "Overture height, Overture levels times floor height, then random "
+            "fallback. Default: 1."
         ),
     )
-    
+
     common_parser.add_argument(
         "--enable-lidar-terrain",
         action="store_true",
@@ -343,7 +345,7 @@ def main():
             wall_material_type=list(ITU_MATERIALS.items())[args.wall_material][0],
             lidar_terrain=args.enable_lidar_terrain,
             dem_terrain=args.enable_dem_terrain,
-            building_height_priority=args.building_height_priority,
+            building_height_mode=args.building_height_mode,
         )
     elif args.command == "point":
         polygon_points_gps = rect_from_point_and_size(
@@ -367,7 +369,7 @@ def main():
             wall_material_type=list(ITU_MATERIALS.items())[args.wall_material][0],
             lidar_terrain=args.enable_lidar_terrain,
             dem_terrain=args.enable_dem_terrain,
-            building_height_priority=args.building_height_priority,
+            building_height_mode=args.building_height_mode,
         )
     elif args.command == "validate":
         res_dict = {

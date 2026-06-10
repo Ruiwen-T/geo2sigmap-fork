@@ -5,6 +5,7 @@ import os
 import numpy as np
 import shapely
 from shapely.geometry import shape, Polygon
+from shapely.geometry.base import BaseGeometry
 from shapely import affinity
 import open3d as o3d
 import xml.etree.ElementTree as ET
@@ -22,9 +23,10 @@ from .itu_materials import ITU_MATERIALS
 import open3d.core as o3c
 
 from .overture_buildings import (
-    HEIGHT_PRIORITY_NO_OVERTURE,
+    HEIGHT_MODE_LIDAR_OSM,
+    HEIGHT_MODE_OVERTURE,
     load_overture_buildings_for_aoi,
-    normalize_building_height_priority,
+    normalize_building_height_mode,
     resolve_building_height,
 )
 
@@ -73,7 +75,7 @@ class Scene:
         lidar_terrain:bool = False,
         dem_terrain:bool = False,
         gen_lidar_terrain_only:bool = False,
-        building_height_priority: str = "overture-first",
+        building_height_mode: str = HEIGHT_MODE_LIDAR_OSM,
     ):
         """
         Generate a ground mesh from the given polygon (defined by `points`),
@@ -89,17 +91,19 @@ class Scene:
         osm_server_addr : str, optieonal
             Custom Overpass API endpoint. If None, osmnx's default is used.
         lidar_calibration : bool, optional
-            If True, attempt to derive building heights from the HAG file; else use random fallback.
+            Deprecated. Building-height source selection is controlled by
+            ``building_height_mode``.
         generate_building_map : bool, optional
             If True, generate a 2D building map image (and save as a NumPy file).
         write_ply_ascii : bool, optional
             If True, write the ply file in ascii format, otherwise binary format will be used.
         ground_scale : float, optional
             The ratio to scale the ground polygon. TODO:Add examples to show why need scale. OSMNX query intersection.
-        building_height_priority : str, optional
-            Building height source order. Supported values are "no-overture",
-            "overture-first", and "osm-first". Numeric aliases "1", "2",
-            and "3" map to those modes respectively.
+        building_height_mode : str, optional
+            Building height source mode. Mode "1" / "lidar-osm" uses LiDAR
+            HAG samples, OSM explicit height tags, OSM floor-count tags, then
+            random fallback. Mode "2" / "overture" uses Overture exact height,
+            Overture levels and level height, then random fallback.
 
         Returns
         -------
@@ -114,9 +118,8 @@ class Scene:
             raise ValueError(f"Invalid rooftop material type: {rooftop_material_type}")
         if wall_material_type not in ITU_MATERIALS:
             raise ValueError(f"Invalid wall material type: {wall_material_type}")
-        building_height_priority = normalize_building_height_priority(
-            building_height_priority
-        )
+        building_height_mode = normalize_building_height_mode(building_height_mode)
+        use_lidar_building_heights = building_height_mode == HEIGHT_MODE_LIDAR_OSM
         
         # ---------------------------------------------------------------------
         # 1) Setup OSM server and transforms
@@ -321,12 +324,14 @@ class Scene:
         try:
             laz_file_path = Path(os.path.join(data_dir, "test_hag.laz"))
             tif_file_path = Path(os.path.join(data_dir, "test_hag.tif"))
-            if lidar_terrain or lidar_calibration:
+            if lidar_terrain or use_lidar_building_heights:
                 if not laz_file_path.exists() or not tif_file_path.exists():
                     
                     from .USGS_LiDAR_HAG import generate_hag
                     
                     generate_hag(affinity.scale(ground_polygon_4326, xfact=ground_scale, yfact=ground_scale, origin='centroid'), data_dir, projection_UTM_EPSG_code)
+                if use_lidar_building_heights and hag_tiff_path is None and tif_file_path.exists():
+                    hag_tiff_path = str(tif_file_path)
                 
     
             
@@ -427,7 +432,7 @@ class Scene:
         ET.SubElement(sionna_shape, "boolean", name="face_normals", value="true")
 
         # ---------------------------------------------------------------------
-        # 5) Query OSM for buildings within the bounding box
+        # 5) Query buildings within the bounding box
         # ---------------------------------------------------------------------
 
         # ground_polygon_4326_bbox => (west, south, east, north)
@@ -447,35 +452,35 @@ class Scene:
         #     logger.warning(f"Too large!")
         #     exit(-1)
 
-        # OSMnx features API uses bounding box in the form (north, south, east, west)
-        logger.debug(
-            f"OSM bounding box: (north={north}, south={south}, east={east}, west={west})"
-        )
-        # buildings are identified from OSM (look for bounding box and "building" tag)
-        buildings = ox.features.features_from_bbox(
-            bbox=ground_polygon_4326_bbox, tags={"building": True}
-        )
-        buildings = buildings.to_crs(projection_UTM_EPSG_code)
-
-        # Filter out the building which outside the bounding box since
-        # OSM will return some extra buildings.
-        filtered_buildings = buildings[buildings.intersects(ground_polygon)]
-        buildings_list = filtered_buildings.to_dict("records")
-
-        if building_height_priority == HEIGHT_PRIORITY_NO_OVERTURE:
-            overture_buildings = None
-        else:
+        if building_height_mode == HEIGHT_MODE_OVERTURE:
             try:
-                overture_buildings = load_overture_buildings_for_aoi(
+                buildings = load_overture_buildings_for_aoi(
                     ground_polygon_4326_bbox,
                     projection_UTM_EPSG_code,
                 )
+                filtered_buildings = buildings[buildings.intersects(ground_polygon)]
+                buildings_list = filtered_buildings.to_dict("records")
             except Exception as exc:
                 logger.warning(
-                    "Unable to load Overture building heights; falling back to LiDAR/OSM/random heights: %s",
+                    "Unable to load Overture building footprints; skipping buildings: %s",
                     exc,
                 )
-                overture_buildings = None
+                buildings_list = []
+        else:
+            # OSMnx features API uses bounding box in the form (north, south, east, west)
+            logger.debug(
+                f"OSM bounding box: (north={north}, south={south}, east={east}, west={west})"
+            )
+            # buildings are identified from OSM (look for bounding box and "building" tag)
+            buildings = ox.features.features_from_bbox(
+                bbox=ground_polygon_4326_bbox, tags={"building": True}
+            )
+            buildings = buildings.to_crs(projection_UTM_EPSG_code)
+
+            # Filter out the building which outside the bounding box since
+            # OSM will return some extra buildings.
+            filtered_buildings = buildings[buildings.intersects(ground_polygon)]
+            buildings_list = filtered_buildings.to_dict("records")
 
         # ---------------------------------------------------------------------
         # 6) If generating building map, prepare an empty grayscale image
@@ -486,7 +491,7 @@ class Scene:
         # ---------------------------------------------------------------------
         # 7) Init the building height handler. (osm or lidar)
         # ---------------------------------------------------------------------
-        if lidar_calibration:
+        if use_lidar_building_heights:
             try:
                 hag_handler = GeoTIFFHandler(hag_tiff_path)
             except Exception as e:
@@ -508,7 +513,11 @@ class Scene:
             # if building['type'] != "multipolygon":
             #     continue
             # Convert building geometry to a shapely polygon
-            building_polygon = shape(building["geometry"])
+            geometry = building["geometry"]
+            if isinstance(geometry, BaseGeometry):
+                building_polygon = geometry
+            else:
+                building_polygon = shape(geometry)
 
             if building_polygon.geom_type != "Polygon":
                 logger.debug(
@@ -560,8 +569,7 @@ class Scene:
                 building_polygon,
                 hag_handler=hag_handler,
                 to_4326=to_4326,
-                overture_buildings=overture_buildings,
-                height_priority=building_height_priority,
+                height_mode=building_height_mode,
             )
 
             # Skip buildings with height <= 0

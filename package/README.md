@@ -43,11 +43,10 @@ The above commands generate a 3D scene for an area in downtown Boston. You can p
 
 Note: By default, the scene will render the terrain as a flat plane. See [Tutorial 3](#3-generate-3d-scene-using-lidar-or-dem-data) to include elevation and terrain information.
 
-Building heights use LiDAR HAG samples first when LiDAR calibration is enabled. After that, choose the remaining source priority with `--building-height-priority`:
+Choose the building height source mode with `--building-height-mode`:
 
-- `no-overture` or `1`: OSM explicit height tags, OSM floor-count tags, then random Gaussian fallback.
-- `overture-first` or `2`: Overture exact height, Overture floor count, OSM explicit height tags, OSM floor-count tags, then random Gaussian fallback. This is the default.
-- `osm-first` or `3`: OSM explicit height tags, Overture exact height, OSM floor-count tags, Overture floor count, then random Gaussian fallback.
+- `lidar-osm` or `1`: LiDAR HAG sampling and averaging, OSM explicit height tags (`building:height`, then `height`), OSM floor-count tags (`building:levels`, then `levels`), then random Gaussian fallback. This is the default.
+- `overture` or `2`: Overture footprints with Overture exact height, Overture levels times floor height, then random Gaussian fallback. This mode does not query OSM buildings.
 
 ### 2) Generate 3D Scene using One Point + Rectangle Dimension
 ```console

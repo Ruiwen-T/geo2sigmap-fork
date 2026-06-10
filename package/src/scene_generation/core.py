@@ -345,7 +345,7 @@ class Scene:
                 assert laz_file_path.exists(), f"LAZ file does not exist: {laz_file_path}"
     
                 assert tif_file_path.exists(), f"TIF file does not exist: {tif_file_path}"
-                print("Skip the lidar_terrain.ply")
+                print("Checking lidar_terrain.ply")
                 if not Path(os.path.join(data_dir,"mesh" ,"lidar_terrain.ply")).exists():
 
                     if dem_terrain:

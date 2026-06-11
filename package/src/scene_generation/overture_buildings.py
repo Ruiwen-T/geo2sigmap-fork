@@ -171,135 +171,136 @@ def load_overture_buildings_for_aoi(
     logger.info("Loaded %d Overture building candidates", len(gdf))
     return gdf
 
+# DEPRECATED function: used in an earlier iteration to match Overture buildings to OSM footprints,
+# but we are now completely isolating Overture data from OSM data (if Overture data is used, no OSM data is used).
+# def lookup_overture_height(
+#     building_polygon: BaseGeometry,
+#     overture_buildings: gpd.GeoDataFrame,
+#     *,
+#     min_iou: float = 0.3,
+#     min_coverage: float = 0.5,
+#     floor_height_m: float = 3.5,
+#     use_num_floors: bool = True,
+#     use_height: bool = True,
+#     return_match: bool = False,
+# ) -> Union[Optional[float], Tuple[Optional[float], Optional[Dict[str, object]]]]:
+#     """
+#     Match one local building footprint to Overture candidates and return a height.
 
-def lookup_overture_height(
-    building_polygon: BaseGeometry,
-    overture_buildings: gpd.GeoDataFrame,
-    *,
-    min_iou: float = 0.3,
-    min_coverage: float = 0.5,
-    floor_height_m: float = 3.5,
-    use_num_floors: bool = True,
-    use_height: bool = True,
-    return_match: bool = False,
-) -> Union[Optional[float], Tuple[Optional[float], Optional[Dict[str, object]]]]:
-    """
-    Match one local building footprint to Overture candidates and return a height.
+#     ``building_polygon`` and ``overture_buildings`` must already be in the same
+#     CRS.
 
-    ``building_polygon`` and ``overture_buildings`` must already be in the same
-    CRS.
+#     The match accepts a candidate when either:
+#       * intersection-over-union is at least ``min_iou``; or
+#       * the candidate covers at least ``min_coverage`` of the local footprint.
 
-    The match accepts a candidate when either:
-      * intersection-over-union is at least ``min_iou``; or
-      * the candidate covers at least ``min_coverage`` of the local footprint.
+#     Parameters
+#     ----------
+#     building_polygon
+#         Local building footprint in the same CRS as ``overture_buildings``.
+#     overture_buildings
+#         GeoDataFrame returned by ``load_overture_buildings_for_aoi``.
+#     min_iou
+#         Minimum intersection-over-union needed for a match.
+#     min_coverage
+#         Minimum fraction of the local footprint covered by the candidate.
+#     floor_height_m
+#         Height per floor used when Overture has floor-count metadata but no
+#         explicit ``height``.
+#     use_num_floors
+#         If true, use Overture levels times ``floor_height_m`` as a fallback height.
+#     use_height
+#         If true, use explicit Overture ``height`` values.
+#     return_match
+#         If true, return ``(height, metadata)``. Otherwise return just height.
 
-    Parameters
-    ----------
-    building_polygon
-        Local building footprint in the same CRS as ``overture_buildings``.
-    overture_buildings
-        GeoDataFrame returned by ``load_overture_buildings_for_aoi``.
-    min_iou
-        Minimum intersection-over-union needed for a match.
-    min_coverage
-        Minimum fraction of the local footprint covered by the candidate.
-    floor_height_m
-        Height per floor used when Overture has floor-count metadata but no
-        explicit ``height``.
-    use_num_floors
-        If true, use Overture levels times ``floor_height_m`` as a fallback height.
-    use_height
-        If true, use explicit Overture ``height`` values.
-    return_match
-        If true, return ``(height, metadata)``. Otherwise return just height.
+#     Returns
+#     -------
+#     float or None
+#         Building height in meters when a matching Overture candidate has a
+#         usable height; otherwise None.
+#     """
 
-    Returns
-    -------
-    float or None
-        Building height in meters when a matching Overture candidate has a
-        usable height; otherwise None.
-    """
+#     no_match = (None, None) if return_match else None
+#     if building_polygon is None or building_polygon.is_empty:
+#         return no_match
+#     if overture_buildings is None or len(overture_buildings) == 0:
+#         return no_match
+#     if "geometry" not in overture_buildings:
+#         return no_match
 
-    no_match = (None, None) if return_match else None
-    if building_polygon is None or building_polygon.is_empty:
-        return no_match
-    if overture_buildings is None or len(overture_buildings) == 0:
-        return no_match
-    if "geometry" not in overture_buildings:
-        return no_match
+#     building_area = building_polygon.area
+#     if building_area <= 0:
+#         return no_match
 
-    building_area = building_polygon.area
-    if building_area <= 0:
-        return no_match
+#     candidate_idx = overture_buildings.sindex.query(
+#         building_polygon,
+#         predicate="intersects",
+#     )
+#     if len(candidate_idx) == 0:
+#         return no_match
 
-    candidate_idx = overture_buildings.sindex.query(
-        building_polygon,
-        predicate="intersects",
-    )
-    if len(candidate_idx) == 0:
-        return no_match
+#     best = None
+#     candidates = overture_buildings.iloc[candidate_idx]
+#     for row_idx, row in candidates.iterrows():
+#         candidate_geom = row.geometry
+#         if candidate_geom is None or candidate_geom.is_empty:
+#             continue
 
-    best = None
-    candidates = overture_buildings.iloc[candidate_idx]
-    for row_idx, row in candidates.iterrows():
-        candidate_geom = row.geometry
-        if candidate_geom is None or candidate_geom.is_empty:
-            continue
+#         intersection_area = building_polygon.intersection(candidate_geom).area
+#         if intersection_area <= 0:
+#             continue
 
-        intersection_area = building_polygon.intersection(candidate_geom).area
-        if intersection_area <= 0:
-            continue
+#         candidate_area = candidate_geom.area
+#         union_area = building_area + candidate_area - intersection_area
+#         if candidate_area <= 0 or union_area <= 0:
+#             continue
 
-        candidate_area = candidate_geom.area
-        union_area = building_area + candidate_area - intersection_area
-        if candidate_area <= 0 or union_area <= 0:
-            continue
+#         iou = intersection_area / union_area
+#         building_coverage = intersection_area / building_area
+#         candidate_coverage = intersection_area / candidate_area
+#         if iou < min_iou and building_coverage < min_coverage:
+#             continue
 
-        iou = intersection_area / union_area
-        building_coverage = intersection_area / building_area
-        candidate_coverage = intersection_area / candidate_area
-        if iou < min_iou and building_coverage < min_coverage:
-            continue
+#         height, source = _height_from_overture_row(
+#             row,
+#             floor_height_m=floor_height_m,
+#             use_height=use_height,
+#             use_num_floors=use_num_floors,
+#         )
+#         if height is None:
+#             continue
 
-        height, source = _height_from_overture_row(
-            row,
-            floor_height_m=floor_height_m,
-            use_height=use_height,
-            use_num_floors=use_num_floors,
-        )
-        if height is None:
-            continue
+#         # Prefer explicit Overture heights over floor-derived estimates, then
+#         # prefer the strongest geometric match.
+#         score = (
+#             1 if source == "height" else 0,
+#             iou,
+#             building_coverage,
+#             candidate_coverage,
+#             intersection_area,
+#         )
+#         if best is None or score > best["score"]:
+#             best = {
+#                 "height": height,
+#                 "score": score,
+#                 "metadata": {
+#                     "overture_id": row.get("id"),
+#                     "height_source": source,
+#                     "height": height,
+#                     "iou": iou,
+#                     "building_coverage": building_coverage,
+#                     "candidate_coverage": candidate_coverage,
+#                     "intersection_area": intersection_area,
+#                     "row_index": row_idx,
+#                 },
+#             }
 
-        # Prefer explicit Overture heights over floor-derived estimates, then
-        # prefer the strongest geometric match.
-        score = (
-            1 if source == "height" else 0,
-            iou,
-            building_coverage,
-            candidate_coverage,
-            intersection_area,
-        )
-        if best is None or score > best["score"]:
-            best = {
-                "height": height,
-                "score": score,
-                "metadata": {
-                    "overture_id": row.get("id"),
-                    "height_source": source,
-                    "height": height,
-                    "iou": iou,
-                    "building_coverage": building_coverage,
-                    "candidate_coverage": candidate_coverage,
-                    "intersection_area": intersection_area,
-                    "row_index": row_idx,
-                },
-            }
-
-    if best is None:
-        return no_match
-    if return_match:
-        return best["height"], best["metadata"]
-    return best["height"]
+#     if best is None:
+#         return no_match
+#     if return_match:
+#         return best["height"], best["metadata"]
+#     return best["height"]
 
 
 def resolve_building_height(

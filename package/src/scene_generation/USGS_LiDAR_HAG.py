@@ -393,6 +393,8 @@ def generate_hag(polygon, data_dir, CRS="EPSG:3857"):
         # if geom.intersects(AOI_EPSG3857):
         if AOI_EPSG3857.within(geom):
             intersecting_polys.append((names[i], geometries_GCS[i], geometries_EPSG3857[i], urls[i], num_points[i]))
+            # print information about dataset
+            print(names[i])
             print(urls[i])
 
     print(f"Found {len(intersecting_polys)} intersecting datasets")
